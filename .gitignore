@@ -22,6 +22,7 @@ upload
 settings
 backup
 error
+output
 
 
 gin-bin

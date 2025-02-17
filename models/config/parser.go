@@ -12,6 +12,42 @@ type ParserConfig struct {
 	CheckPeriod time.Duration // 檢查週期
 	MappingTag  MappingTag    // 映射標籤
 	MetricSpec  MetricSpec    // 指標規格
+	MaxDataAge  int64         // 最大數據年齡
+	AwrConfig   AwrConfig     // AWR 配置
+}
+
+type AwrSetting struct {
+	DefaultTables        AwrTablesSetting `json:"default_tables"`
+	Information          AwrTablesSetting `json:"information"`
+	InstanceEfficiency   AwrTablesSetting `json:"instance_efficiency"`
+	CacheSizes           AwrTablesSetting `json:"cache_sizes"`
+	Iostat               AwrTablesSetting `json:"iostat"`
+	SharedPoolStatistics AwrTablesSetting `json:"shared_pool_statistics"`
+	MemoryStatistics     AwrTablesSetting `json:"memory_statistics"`
+	OperatingSystem      AwrTablesSetting `json:"operating_system"`
+	UndoSegment          AwrTablesSetting `json:"undo_segment"`
+	InstanceActivity     AwrTablesSetting `json:"instance_activity"`
+	WaitEventHistogram   AwrTablesSetting `json:"wait_event_histogram"`
+	TablespaceIoStats    AwrTablesSetting `json:"tablespace_io_stats"`
+	BufferPoolStatistics AwrTablesSetting `json:"buffer_pool_statistics"`
+	SegmentStatistics    AwrTablesSetting `json:"segment_statistics"`
+	SqlStatistics        AwrTablesSetting `json:"sql_statistics"`
+	//* 新版本 Information
+	DatabaseSummary AwrTablesSetting `json:"database_summary"`
+}
+
+type AwrConfig struct {
+	EnabledTables AwrSetting `yaml:"enabled_tables" json:"enabled_tables"`
+	SQLText       struct {
+		Enable        bool `yaml:"enable" json:"enable"`
+		RetentionDays int  `yaml:"retention_days" json:"retention_days"`
+	}
+}
+
+type AwrTablesSetting struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	RawName string `yaml:"raw_name" json:"raw_name"`
+	NewName string `yaml:"new_name" json:"new_name"`
 }
 
 // Metric 指標定義
@@ -43,6 +79,7 @@ type MetricSpecConfig struct {
 		BufferUsage MetricSpec `yaml:"buffer_usage"`
 		CacheUsage  MetricSpec `yaml:"cache_usage"`
 		Usage       MetricSpec `yaml:"usage"`
+		FreeUsage   MetricSpec `yaml:"free_usage"`
 	} `yaml:"memory"`
 
 	Swap struct {
@@ -70,6 +107,9 @@ type MetricSpecConfig struct {
 		Rqueue      MetricSpec `yaml:"rqueue"`
 		Wqueue      MetricSpec `yaml:"wqueue"`
 		QueueLength MetricSpec `yaml:"queue_length"`
+		IOTime      MetricSpec `yaml:"io_time"`
+		ReadTime    MetricSpec `yaml:"read_time"`
+		WriteTime   MetricSpec `yaml:"write_time"`
 	} `yaml:"disk"`
 
 	Filesystem struct {
@@ -77,6 +117,7 @@ type MetricSpecConfig struct {
 		FreeBytes  MetricSpec `yaml:"free_bytes"`
 		UsedBytes  MetricSpec `yaml:"used_bytes"`
 		Usage      MetricSpec `yaml:"usage"`
+		FreeUsage  MetricSpec `yaml:"free_usage"`
 	} `yaml:"filesystem"`
 
 	Process struct {
@@ -111,10 +152,14 @@ type MetricSpecConfig struct {
 
 type MappingTag struct {
 	Base struct {
-		Host   string `json:"host"`
-		Source string `json:"source"`
-		Os     string `json:"os"`
-		IP     string `json:"ip"`
+		Host      string `json:"host"`
+		Database  string `json:"database"`
+		Source    string `json:"source"`
+		Os        string `json:"os"`
+		IP        string `json:"ip"`
+		Timestamp string `json:"timestamp"`
+		Value     string `json:"value"`
+		Metric    string `json:"metric"`
 	} `json:"base"`
 	Os struct {
 		Aix     string `json:"aix"`
@@ -131,7 +176,6 @@ type MappingTag struct {
 		OracleConnection string `json:"oracle_connection"`
 	} `json:"source"`
 	Partition struct {
-		InstanceName   string `json:"instance_name"`
 		TablespaceName string `json:"tablespace_name"`
 		CPUName        string `json:"cpu_name"`
 		DiskName       string `json:"disk_name"`
@@ -140,9 +184,26 @@ type MappingTag struct {
 		ProcessName    string `json:"process_name"`
 		NetworkName    string `json:"network_name"`
 	} `json:"partition"`
+	Category struct {
+		CPU        string `json:"cpu"`
+		Memory     string `json:"memory"`
+		Swap       string `json:"swap"`
+		Network    string `json:"network"`
+		Disk       string `json:"disk"`
+		Filesystem string `json:"filesystem"`
+		Process    string `json:"process"`
+		System     string `json:"system"`
+		Connection string `json:"connection"`
+		Tablespace string `json:"tablespace"`
+	} `json:"category"`
 	Sql struct {
 		ID     string `json:"id"`
 		Module string `json:"module"`
 		Text   string `json:"text"`
 	} `json:"sql"`
+}
+
+// IsEmpty 檢查 AWR 配置是否為空
+func (c AwrConfig) IsEmpty() bool {
+	return c == AwrConfig{}
 }

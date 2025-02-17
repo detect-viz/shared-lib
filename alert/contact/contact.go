@@ -19,7 +19,6 @@ type ContactService interface {
 	Delete(id int64) error
 
 	// 檢查操作
-
 	CheckName(contact models.AlertContact) (bool, string)
 }
 

@@ -80,33 +80,27 @@ func (s *Service) Init() error {
 }
 
 // ProcessFile 處理檔案
-func (s *Service) ProcessFile(file models.FileInfo) error {
+func (s *Service) ProcessFile(file models.FileInfo, metrics map[string][]map[string]interface{}) error {
 	// 確保目錄存在
 	if err := s.InitAlertDirs(); err != nil {
 		return err
 	}
 
 	// 檢查規則是否存在
-	rules, ok := s.rules[file.Hostname]
+	rules, ok := s.rules[file.Host]
 	if !ok || len(rules) == 0 {
 		return nil
 	}
 
-	// 解析數據
-	metrics, err := s.parser.Parse(file.Content)
-	if err != nil {
-		s.logger.Error("解析數據失敗", zap.Error(err))
-		return err
-	}
-	if len(metrics) == 0 {
-		s.logger.Warn("沒有解析到數據", zap.String("file", file.FileName))
-		return nil
-	}
 	var exceeded bool
 	// 檢查每個規則
 	for _, rule := range rules {
-
-		exceeded = s.Check(rule, file, metrics)
+		key := fmt.Sprintf("%s:%s", rule.Metric, rule.ResourceName)
+		metricData, ok := metrics[key]
+		if !ok {
+			continue // 找不到對應的指標數據，跳過此規則
+		}
+		exceeded = s.Check(rule, file, metricData)
 
 		if exceeded {
 			// 5. 檢查靜音期
@@ -605,7 +599,7 @@ func (s *Service) applySilenceAndMute(rule *models.CheckRule) {
 }
 
 // Check 檢查告警規則
-func (s *Service) Check(rule models.CheckRule, file models.FileInfo, metrics map[string]interface{}) bool {
+func (s *Service) Check(rule models.CheckRule, file models.FileInfo, metrics []map[string]interface{}) bool {
 	exceeded := s.CheckSingle(rule, file, metrics)
 
 	if exceeded {
@@ -641,13 +635,13 @@ func (s *Service) Check(rule models.CheckRule, file models.FileInfo, metrics map
 }
 
 // checkJoint 聯合檢查
-func (s *Service) CheckJoint(rule models.CheckRule, file models.FileInfo, metrics map[string]interface{}) bool {
+func (s *Service) CheckJoint(rule models.CheckRule, file models.FileInfo, metrics []map[string]interface{}) bool {
 	// 同時滿足絕對值和振幅條件
 	return s.CheckAbsolute(rule, file, metrics) && s.CheckAmplitude(rule, file, metrics)
 }
 
 // checkSingle 單一檢查
-func (s *Service) CheckSingle(rule models.CheckRule, file models.FileInfo, metrics map[string]interface{}) bool {
+func (s *Service) CheckSingle(rule models.CheckRule, file models.FileInfo, metrics []map[string]interface{}) bool {
 	switch rule.CheckType {
 	case "absolute":
 		return s.CheckAbsolute(rule, file, metrics)

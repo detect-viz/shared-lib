@@ -31,6 +31,14 @@ type (
 	AlertRuleContact       = alert.AlertRuleContact
 	RepeatTime             = alert.RepeatTime
 	JSONMap                = alert.JSONMap
+	CurrentAlert           = alert.CurrentAlert
+	HistoryAlert           = alert.HistoryAlert
+	RuleConfig             = alert.RuleConfig
+	AlertContactSeverity   = alert.AlertContactSeverity
+	ContactDefinition      = alert.ContactDefinition
+	ContactConfig          = alert.ContactConfig
+	RuleDefinition         = alert.RuleDefinition
+	ThresholdConfig        = alert.ThresholdConfig
 
 	// Notify 相關
 	ChannelType   = notify.ChannelType
@@ -47,6 +55,7 @@ type (
 	Common         = common.Common
 	Response       = common.Response
 	OptionResponse = common.OptionResponse
+	MetricResponse = common.MetricResponse
 	SSOUser        = common.SSOUser
 	RotateSetting  = common.RotateSetting
 	RotateTask     = common.RotateTask
@@ -68,6 +77,8 @@ type (
 	ChannelConfig    = config.ChannelConfig
 	NotifyConfig     = config.NotifyConfig
 	MetricSpecConfig = config.MetricSpecConfig
+	MetricSpec       = config.MetricSpec
+	MappingTag       = config.MappingTag
 
 	// Template 相關
 	TemplateData      = template.TemplateData

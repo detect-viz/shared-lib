@@ -1,22 +1,16 @@
 package parser
 
 import (
-	"bytes"
 	"time"
-
-	"shared-lib/models/common"
 )
 
 // 檔案來源和日期資訊
 type FileInfo struct {
-	ID         string `json:"id"`
-	Path       string `json:"path"`
-	Status     string `json:"status"`
-	Type       string `json:"type"`
-	User       common.SSOUser
-	FileName   string
-	SourceName string
-	Hostname   string        // 主機名
-	Timestamp  time.Time     // 時間戳
-	Content    *bytes.Buffer // 內容
+	Realm     string    `json:"realm"`
+	Source    string    `json:"source"`
+	FileName  string    `json:"file_name"`
+	Host      string    `json:"host"`
+	UserID    string    `json:"user_id"`
+	Status    bool      `json:"status"`
+	Timestamp time.Time `json:"timestamp"`
 }

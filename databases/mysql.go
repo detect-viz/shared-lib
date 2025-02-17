@@ -1,10 +1,16 @@
 package databases
 
 import (
+	"errors"
 	"fmt"
+	"time"
 
 	"shared-lib/models"
 
+	"shared-lib/interfaces"
+
+	"go.uber.org/zap"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -13,6 +19,54 @@ type MySQL struct {
 }
 
 func NewMySQL(db *gorm.DB) *MySQL {
+	return &MySQL{db: db}
+}
+
+func NewDatabase(cfg *models.DatabaseConfig, logger interfaces.Logger) *MySQL {
+	// get env config
+	host := cfg.MySQL.Host
+	port := cfg.MySQL.Port
+	user := cfg.MySQL.User
+	password := cfg.MySQL.Password
+	params := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local", user, password, host, port, cfg.MySQL.DBName)
+
+	err := errors.New("mock error")
+	var db *gorm.DB
+	for err != nil {
+		db, err = gorm.Open(mysql.Open(params), &gorm.Config{
+			DisableForeignKeyConstraintWhenMigrating: true,
+		})
+		time.Sleep(1 * time.Second)
+
+		if cfg.MySQL.Level == "debug" {
+			db = db.Debug()
+		}
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		logger.Error(
+			fmt.Sprintf("mysql [%v] connection error: %v", params, err.Error()),
+			zap.String("service", "mysql"),
+		)
+		return nil
+	}
+
+	// SetMaxIdleConns sets the maximum number of connections in the idle connection pool.
+	sqlDB.SetMaxIdleConns(int(cfg.MySQL.MaxIdle))
+
+	// SetMaxOpenConns sets the maximum number of open connections to the database.
+	sqlDB.SetMaxOpenConns(int(cfg.MySQL.MaxOpen))
+
+	// SetConnMaxLifetime sets the maximum amount of time a connection may be reused.
+	lifeTime, _ := time.ParseDuration(cfg.MySQL.MaxLife)
+	sqlDB.SetConnMaxLifetime(lifeTime)
+
+	logger.Info(
+		fmt.Sprintf("mysql [%v] connection success", cfg.MySQL.DBName),
+		zap.String("service", "mysql"),
+	)
+
 	return &MySQL{db: db}
 }
 
@@ -71,7 +125,7 @@ func (m *MySQL) SaveAlertState(state models.AlertState) error {
 }
 
 // GetAlertContacts 獲取規則的聯絡人列表
-func (m *MySQL) GetAlertContacts(ruleID string) ([]models.AlertContact, error) {
+func (m *MySQL) GetAlertContacts(ruleID int64) ([]models.AlertContact, error) {
 	var contacts []models.AlertContact
 
 	// 1. 查詢規則關聯的聯絡人
@@ -121,4 +175,71 @@ func (m *MySQL) WriteNotificationLog(notification models.NotificationLog) error 
 
 	// 提交交易
 	return tx.Commit().Error
+}
+
+// Close 關閉資料庫連接
+func (db *MySQL) Close() error {
+	sqlDB, err := db.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}
+
+// CreateAlertRule 創建告警規則
+func (m *MySQL) CreateAlertRule(rule *models.AlertRule) error {
+	return m.db.Create(rule).Error
+}
+
+// CreateOrUpdateAlertRule 創建或更新告警規則
+func (m *MySQL) CreateOrUpdateAlertRule(rule *models.AlertRule) error {
+	return m.db.Save(rule).Error
+}
+
+// CreateOrUpdateAlertContact 創建或更新通知管道
+func (m *MySQL) CreateOrUpdateAlertContact(contact *models.AlertContact) error {
+	return m.db.Save(contact).Error
+}
+
+// CreateContact 創建聯絡人
+func (m *MySQL) CreateContact(contact *models.AlertContact) error {
+	return m.db.Create(contact).Error
+}
+
+// DeleteAlertRule 刪除告警規則
+func (m *MySQL) DeleteAlertRule(ruleID int64) error {
+	return m.db.Delete(&models.AlertRule{}, ruleID).Error
+}
+
+// DeleteContact 刪除聯絡人
+func (m *MySQL) DeleteContact(contactID int64) error {
+	return m.db.Delete(&models.AlertContact{}, contactID).Error
+}
+
+// GetAlertRuleByID 獲取告警規則
+func (m *MySQL) GetAlertRuleByID(ruleID int64) (models.AlertRule, error) {
+	var rule models.AlertRule
+	return rule, m.db.First(&rule, ruleID).Error
+}
+
+// GetAlertRulesByRealm 獲取指定 Realm 的告警規則
+func (m *MySQL) GetAlertRulesByRealm(realm string) ([]models.AlertRule, error) {
+	var rules []models.AlertRule
+	return rules, m.db.Where("realm = ?", realm).Find(&rules).Error
+}
+
+// UpdateAlertRule 更新告警規則
+func (m *MySQL) UpdateAlertRule(rule *models.AlertRule) error {
+	return m.db.Save(rule).Error
+}
+
+// UpdateContact 更新聯絡人
+func (m *MySQL) UpdateContact(contact *models.AlertContact) error {
+	return m.db.Save(contact).Error
+}
+
+// GetContactByID 獲取聯絡人
+func (m *MySQL) GetContactByID(id int64) (models.AlertContact, error) {
+	var contact models.AlertContact
+	return contact, m.db.First(&contact, id).Error
 }

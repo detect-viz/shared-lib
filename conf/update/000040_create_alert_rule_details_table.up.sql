@@ -1,0 +1,21 @@
+CREATE TABLE `alert_rule_details` (
+  `realm_name` varchar(20) NOT NULL DEFAULT 'master',
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `alert_rule_id` bigint NOT NULL,
+  `resource_name` varchar(100) NOT NULL,
+  `partition_name` varchar(50) DEFAULT NULL,
+  `silence_time_range` varchar(50) DEFAULT NULL,
+  `last_state_change_time` bigint DEFAULT NULL,
+  `last_alert_time` bigint DEFAULT NULL,
+  `last_alert_severity` varchar(50) DEFAULT NULL,
+  `event_duration` int DEFAULT NULL,
+  `created_at` bigint unsigned DEFAULT NULL,
+  `updated_at` bigint unsigned DEFAULT NULL,
+  `deleted_at` bigint DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `fk_detail_realms` (`realm_name`),
+  KEY `fk_detail_rules` (`alert_rule_id`),
+  KEY `fk_detail_severity` (`last_alert_severity`),
+  CONSTRAINT `fk_detail_realms` FOREIGN KEY (`realm_name`) REFERENCES `realms` (`name`),
+  CONSTRAINT `fk_detail_rules` FOREIGN KEY (`alert_rule_id`) REFERENCES `alert_rules` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

@@ -27,4 +27,5 @@ type CheckRule struct {
 	InfoThreshold *float64 `json:"info_threshold,omitempty"` // 資訊閾值
 	WarnThreshold *float64 `json:"warn_threshold,omitempty"` // 警告閾值
 	CritThreshold *float64 `json:"crit_threshold,omitempty"` // 嚴重閾值
+	Contacts      []string `json:"contacts,omitempty"`       // 通知對象
 }

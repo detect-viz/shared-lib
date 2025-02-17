@@ -7,6 +7,9 @@ import (
 
 // 通知服務介面
 type NotifyService interface {
+	// 獲取待處理的文件
+	GetPendingFiles() ([]models.FileInfo, error)
+
 	// 通知發送
 	Send(notification models.NotificationLog) error
 	SendNotification(notification *models.NotificationLog) error

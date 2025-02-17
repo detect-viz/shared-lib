@@ -7,6 +7,12 @@ import (
 // 資料庫介面
 type Database interface {
 	// 告警規則相關
+	GetAlertRulesByRealm(realm string) ([]models.AlertRule, error)
+	GetAlertRuleByID(id int64) (models.AlertRule, error)
+	CreateAlertRule(rule *models.AlertRule) error
+	UpdateAlertRule(rule *models.AlertRule) error
+	DeleteAlertRule(id int64) error
+
 	GetMetricRule(id int64) (models.MetricRule, error)
 	GetAlertRuleDetails(ruleID int64) ([]models.AlertRuleDetail, error)
 	GetCustomLabels(ruleID int64) (map[string]string, error)
@@ -18,13 +24,13 @@ type Database interface {
 	CreateContact(contact *models.AlertContact) error
 	UpdateContact(contact *models.AlertContact) error
 	DeleteContact(id int64) error
+	GetContactByID(id int64) (models.AlertContact, error)
+	CreateOrUpdateAlertContact(contact *models.AlertContact) error
+	CreateOrUpdateAlertRule(rule *models.AlertRule) error
 
 	// 日誌相關
 	WriteTriggeredLog(trigger models.TriggerLog) error
 	WriteNotificationLog(notification models.NotificationLog) error
 
-	GetPendingFiles() ([]models.FileInfo, error)
-	SaveMetrics(fileID string, metrics map[string]interface{}) error
-	UpdateFile(file models.FileInfo) error
 	Close() error
 }
