@@ -24,7 +24,7 @@ func NewAlertStateManager(db interfaces.Database, logger interfaces.Logger) *Ale
 // GetAndUpdateState 獲取並更新告警狀態
 func (m *AlertStateManager) GetAndUpdateState(rule models.CheckRule, value float64, timestamp int64) (models.AlertState, bool, error) {
 	// 1. 獲取當前狀態
-	state, err := m.db.GetAlertState(rule.RuleID, rule.ResourceName, rule.Metric)
+	state, err := m.db.GetAlertState(rule.RuleID, rule.ResourceName, rule.MetricName)
 	if err != nil {
 		return state, false, err
 	}
@@ -81,7 +81,7 @@ func (m *AlertStateManager) resetState(state models.AlertState, value float64, t
 // GetAndUpdateAmplitudeState 獲取並更新振幅檢查狀態
 func (m *AlertStateManager) GetAndUpdateAmplitudeState(rule models.CheckRule, value float64, timestamp int64) (models.AlertState, bool, error) {
 	// 1. 獲取當前狀態
-	state, err := m.db.GetAlertState(rule.RuleID, rule.ResourceName, rule.Metric)
+	state, err := m.db.GetAlertState(rule.RuleID, rule.ResourceName, rule.MetricName)
 	if err != nil {
 		return state, false, err
 	}

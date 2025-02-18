@@ -39,6 +39,7 @@ type (
 	ContactConfig          = alert.ContactConfig
 	RuleDefinition         = alert.RuleDefinition
 	ThresholdConfig        = alert.ThresholdConfig
+	AlertRuleLabel         = alert.AlertRuleLabel
 
 	// Notify 相關
 	ChannelType   = notify.ChannelType

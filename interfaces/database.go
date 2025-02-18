@@ -6,7 +6,10 @@ import (
 
 // 資料庫介面
 type Database interface {
+	// 載入告警遷移
+	LoadAlertMigrate(path string) error
 	// 告警規則相關
+	GetAlertRules() (map[string][]models.AlertRule, error)
 	GetAlertRulesByRealm(realm string) ([]models.AlertRule, error)
 	GetAlertRuleByID(id int64) (models.AlertRule, error)
 	CreateAlertRule(rule *models.AlertRule) error
@@ -27,6 +30,9 @@ type Database interface {
 	GetContactByID(id int64) (models.AlertContact, error)
 	CreateOrUpdateAlertContact(contact *models.AlertContact) error
 	CreateOrUpdateAlertRule(rule *models.AlertRule) error
+
+	// 資源群組相關
+	GetResourceGroupName(id int64) (string, error)
 
 	// 日誌相關
 	WriteTriggeredLog(trigger models.TriggerLog) error

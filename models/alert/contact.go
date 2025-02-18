@@ -2,7 +2,6 @@ package alert
 
 import (
 	"shared-lib/models/common"
-	"shared-lib/models/config"
 
 	"gorm.io/gorm"
 )
@@ -16,15 +15,14 @@ type AlertContact struct {
 	Type       string                 `json:"type"` // 通知類型
 	Enabled    bool                   `json:"enabled" gorm:"default:1"`
 	Details    JSONMap                `json:"details" gorm:"type:json"`
-	Severities []AlertContactSeverity `json:"severities" gorm:"many2many:alert_contact_severities"` // 多選
-	Levels     []config.Code          `json:"levels"  gorm:"-"`                                     // 前端顯示
+	Severities []AlertContactSeverity `json:"severities"  gorm:"many2many:alert_contact_severities"`
 	DeletedAt  gorm.DeletedAt         `json:"deleted_at" gorm:"index"`
 }
 
 // AlertContactSeverity (多對多關聯)
 type AlertContactSeverity struct {
-	ID       int64  `json:"id" gorm:"primaryKey;autoIncrement"`
-	Severity string `json:"severity" gorm:"type:enum('level_info','level_warn','level_crit');unique"`
+	AlertContactID int64  `json:"alert_contact_id"`
+	Severity       string `json:"severity" gorm:"type:enum('info','warn','crit');unique"`
 }
 
 type AlertRuleContact struct {

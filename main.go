@@ -3,9 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"shared-lib/alert"
 	"shared-lib/config"
 	"shared-lib/databases"
@@ -16,47 +14,22 @@ import (
 )
 
 func main() {
-
+	// 初始化服務
 	alertService := initService()
-
-	file := models.FileInfo{
-		Realm:    "master",
-		Source:   "test",
-		FileName: "test",
-		Host:     "test",
-	}
-
-	metrics := readJsonFile("output/AL2SUB_08310400.csv.json")
-
-	if err := alertService.ProcessFile(file, metrics); err != nil {
-		fmt.Println("處理告警失敗:", err)
+	if alertService == nil {
+		return
 	}
 
 	// 啟動 API 服務
 	http.HandleFunc("/api/alert", handleAlert)
-	fmt.Println("🚀 Alert API 服務啟動於 http://localhost:8081")
+	fmt.Println("Alert API 服務啟動於 http://localhost:8081")
 	http.ListenAndServe(":8081", nil)
 }
 
-func readJsonFile(filename string) map[string][]map[string]interface{} {
-	jsonFile, err := os.Open(filename)
-	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return nil
-	}
-	defer jsonFile.Close()
-
-	byteValue, _ := io.ReadAll(jsonFile)
-
-	var result map[string][]map[string]interface{}
-	json.Unmarshal([]byte(byteValue), &result)
-
-	return result
-}
 func initService() *alert.Service {
 	// 1️⃣ 讀取設定檔
 	configManager := config.New()
-	if err := configManager.Load("/etc/bimap-ipoc/config.yml"); err != nil {
+	if err := configManager.Load("./config.yaml"); err != nil {
 		panic(err)
 	}
 	cfg := configManager.GetConfig()
@@ -67,13 +40,16 @@ func initService() *alert.Service {
 		panic(err)
 	}
 
+	logMgr, err := logger.NewLogManager(&cfg.Logger)
+	if err != nil {
+		panic(err)
+	}
+
 	// 3️⃣ 初始化資料庫
 	db := databases.NewDatabase(&cfg.Database, logSvc)
 
-	// 4️⃣ 初始化各個 Service
-	alertService := alert.NewService(cfg.Alert, logSvc, db)
-
-	// 5️⃣ 啟動模組
+	// 4️⃣ 初始化告警服務
+	alertService := alert.NewService(cfg.Alert, db, logSvc, logMgr)
 	if err := alertService.Init(); err != nil {
 		logSvc.Error("初始化告警服務失敗", zap.Error(err))
 		return nil
@@ -82,21 +58,25 @@ func initService() *alert.Service {
 	return alertService
 }
 
-// API: 接收 `iPOC` 送來的數據並處理
+// handleAlert 處理來自 iPOC 的告警數據
 func handleAlert(w http.ResponseWriter, r *http.Request) {
-
-	// 4️⃣ 初始化各個 Service
 	alertService := initService()
+	if alertService == nil {
+		http.Error(w, "服務初始化失敗", http.StatusInternalServerError)
+		return
+	}
 
 	var metrics map[string][]map[string]interface{}
-	body, _ := io.ReadAll(r.Body)
-	json.Unmarshal(body, &metrics)
+	if err := json.NewDecoder(r.Body).Decode(&metrics); err != nil {
+		http.Error(w, "解析請求數據失敗", http.StatusBadRequest)
+		return
+	}
 
 	file := models.FileInfo{
 		Realm:    "master",
-		Source:   "api",
+		Source:   "logman",
 		FileName: "from-http",
-		Host:     "remote-ipoc",
+		Host:     "SRVECCDV01",
 	}
 
 	if err := alertService.ProcessFile(file, metrics); err != nil {
@@ -105,5 +85,5 @@ func handleAlert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status": "alert processed"}`))
+	json.NewEncoder(w).Encode(map[string]string{"status": "alert processed"})
 }

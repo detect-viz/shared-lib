@@ -9,10 +9,17 @@ import (
 	"time"
 
 	"shared-lib/models"
+	"shared-lib/models/common"
 
 	"go.uber.org/zap"
 
 	"shared-lib/interfaces"
+)
+
+const (
+	NotifyPath = "notify"
+	BackupPath = "backup"
+	FailedPath = "failed"
 )
 
 // Service 通知服務
@@ -37,37 +44,38 @@ func NewService(config models.NotifyConfig, logSvc interfaces.Logger, db interfa
 // Init 初始化服務
 func (s *Service) Init() error {
 	// 初始化目錄
-	dirs := []string{
-		s.config.WorkDir.NotifyPath,
-		s.config.WorkDir.BackupPath,
-		s.config.WorkDir.FailedPath,
-	}
-
-	for _, dir := range dirs {
-		if dir == "" {
-			continue
-		}
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			s.logger.Error("創建通知目錄失敗",
-				zap.String("path", dir),
-				zap.Error(err))
-			return err
-		}
+	workDir := filepath.Join(s.config.WorkPath, BackupPath) // 備份路徑
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		s.logger.Error("創建通知目錄失敗",
+			zap.String("path", workDir),
+			zap.Error(err))
+		return err
 	}
 
 	// 註冊輪轉任務
-	if s.config.Rotate.RotateSetting.Enabled {
-		// 設置任務路徑
-		s.config.Rotate.SourcePath = s.config.WorkDir.NotifyPath
-		s.config.Rotate.DestPath = s.config.WorkDir.BackupPath
-		s.config.Rotate.JobID = "notify_rotate"
+	if s.config.Rotate.Enabled {
+		task := common.RotateTask{
+			JobID:      "notify_rotate_" + workDir,
+			SourcePath: workDir,
+			DestPath:   workDir,
+			RotateSetting: common.RotateSetting{
+				Schedule:            "0 0 1 * * *",
+				MaxAge:              time.Duration(s.config.Rotate.MaxAge),
+				MaxSizeMB:           s.config.Rotate.MaxSizeMB,
+				CompressEnabled:     true,
+				CompressMatchRegex:  "*${YYYYMMDD}*.log",
+				CompressOffsetHours: 2,
+				CompressSaveRegex:   "${YYYYMMDD}.tar.gz",
+				MinDiskFreeMB:       300,
+			},
+		}
 
-		if err := s.logMgr.RegisterRotateTask(s.config.Rotate); err != nil {
+		if err := s.logMgr.RegisterRotateTask(task); err != nil {
 			return fmt.Errorf("註冊輪轉任務失敗: %w", err)
 		}
 		s.logger.Info("已註冊通知日誌輪轉任務",
-			zap.String("source", s.config.Rotate.SourcePath),
-			zap.String("dest", s.config.Rotate.DestPath))
+			zap.String("source", task.SourcePath),
+			zap.String("dest", task.DestPath))
 	}
 
 	s.logger.Info("通知服務初始化完成")
@@ -80,7 +88,7 @@ func (s *Service) ProcessNotifications() error {
 	if err != nil {
 		s.logger.Error("讀取通知日誌失敗",
 			zap.Error(err),
-			zap.String("path", s.config.WorkDir.NotifyPath))
+			zap.String("path", s.config.WorkPath))
 		return fmt.Errorf("讀取通知日誌失敗: %w", err)
 	}
 
@@ -184,10 +192,10 @@ func (s *Service) archiveNotification(notification models.NotificationLog) error
 
 	oldPath := *notification.FilePath
 	fileName := filepath.Base(oldPath)
-	newPath := filepath.Join(s.config.WorkDir.BackupPath, fileName)
+	newPath := filepath.Join(s.config.WorkPath, BackupPath, fileName)
 
 	// 確保目標目錄存在
-	if err := os.MkdirAll(s.config.WorkDir.BackupPath, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(s.config.WorkPath, BackupPath), 0755); err != nil {
 		return fmt.Errorf("create backup directory failed: %w", err)
 	}
 
@@ -203,7 +211,7 @@ func (s *Service) readNotificationLogs() ([]models.NotificationLog, error) {
 	var notifications []models.NotificationLog
 
 	// 讀取目錄下所有檔案
-	files, err := os.ReadDir(s.config.WorkDir.NotifyPath)
+	files, err := os.ReadDir(filepath.Join(s.config.WorkPath, NotifyPath))
 	if err != nil {
 		return nil, fmt.Errorf("讀取目錄失敗: %v", err)
 	}
@@ -214,7 +222,7 @@ func (s *Service) readNotificationLogs() ([]models.NotificationLog, error) {
 			continue
 		}
 
-		path := filepath.Join(s.config.WorkDir.NotifyPath, file.Name())
+		path := filepath.Join(s.config.WorkPath, NotifyPath, file.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
 			s.logger.Error("讀取檔案失敗",

@@ -19,8 +19,6 @@ type Logger interface {
 
 // LogManager 日誌管理介面
 type LogManager interface {
-	// 註冊清理任務
-	RegisterCleaner(name string, options LogCleanerOptions) error
 	// 啟動日誌管理服務
 	Start() error
 	// 停止日誌管理服務

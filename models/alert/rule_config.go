@@ -25,14 +25,14 @@ type ThresholdConfig struct {
 // ToCheckRule 將 RuleDefinition 轉換為 CheckRule
 func (rd *RuleDefinition) ToCheckRule() *CheckRule {
 	return &CheckRule{
-		RuleName:      rd.Name,
-		ResourceGroup: rd.ResourceGroupName, // name 轉 id
-		Metric:        rd.MetricRuleID,      // id 找 metric name
-		Duration:      rd.Duration,
-		Labels:        rd.Labels,
-		InfoThreshold: rd.Thresholds.Info,
-		WarnThreshold: rd.Thresholds.Warn,
-		CritThreshold: rd.Thresholds.Crit,
+		RuleName:          rd.Name,
+		ResourceGroupName: rd.ResourceGroupName, // name 轉 id
+		MetricName:        rd.MetricRuleID,      // id 找 metric name
+		Duration:          rd.Duration,
+		Labels:            rd.Labels,
+		InfoThreshold:     rd.Thresholds.Info,
+		WarnThreshold:     rd.Thresholds.Warn,
+		CritThreshold:     rd.Thresholds.Crit,
 	}
 }
 

@@ -23,6 +23,7 @@ settings
 backup
 error
 output
+log
 
 
 gin-bin

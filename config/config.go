@@ -94,11 +94,11 @@ func (m *Manager) GetDatabaseConfig() models.DatabaseConfig {
 }
 
 // GetMetricSpecConfig 獲取指標配置
-func (m *Manager) GetMetricSpecConfig() models.MetricSpecConfig {
-	m.RLock()
-	defer m.RUnlock()
-	return m.config.Metric
-}
+// func (m *Manager) GetMetricSpecConfig() models.MetricSpecConfig {
+// 	m.RLock()
+// 	defer m.RUnlock()
+// 	return m.config.Metric
+// }
 
 // GetRawConfig 獲取原始 viper 實例
 func (m *Manager) GetRawConfig() *viper.Viper {

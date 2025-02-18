@@ -5,23 +5,23 @@ import (
 	"sync"
 
 	"shared-lib/interfaces"
+	"shared-lib/models"
 	"shared-lib/models/common"
 )
 
 // LogManager 日誌管理器
 type LogManager struct {
 	sync.RWMutex
-	config    interfaces.Config
-	logger    interfaces.Logger
+	config    *models.LoggerConfig
+	logger    *Logger
 	rotator   *RotateManager
 	stopChan  chan struct{}
 	waitGroup sync.WaitGroup
 }
 
 // NewLogManager 創建日誌管理器
-func NewLogManager(config interfaces.Config) (*LogManager, error) {
-	logConfig := config.GetLoggerConfig()
-	logger, err := NewLogger(&logConfig, WithCallerSkip(1))
+func NewLogManager(config *models.LoggerConfig) (*LogManager, error) {
+	logger, err := NewLogger(config, WithCallerSkip(1))
 	if err != nil {
 		return nil, fmt.Errorf("創建日誌管理器失敗: %w", err)
 	}
@@ -58,4 +58,9 @@ func (m *LogManager) Stop() {
 	close(m.stopChan)
 	m.rotator.Stop()
 	m.waitGroup.Wait()
+}
+
+// GetLogger 獲取日誌實例
+func (m *LogManager) GetLogger() interfaces.Logger {
+	return m.logger
 }

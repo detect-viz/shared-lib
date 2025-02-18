@@ -32,6 +32,46 @@ func CheckThreshold(rule models.CheckRule, operator string, value float64) bool 
 	return false
 }
 
+func GetSeverity(rule models.CheckRule, value float64) string {
+	// **根據閾值更新 Severity**
+	switch rule.Operator {
+	case ">", ">=":
+		if *rule.CritThreshold != 0 {
+			if value > *rule.CritThreshold {
+				rule.Severity = "crit"
+			} else if *rule.WarnThreshold != 0 {
+				if value > *rule.WarnThreshold {
+					rule.Severity = "warn"
+				} else {
+					rule.Severity = "info"
+				}
+			} else {
+				rule.Severity = "info"
+			}
+		} else {
+			rule.Severity = "info"
+		}
+	case "<", "<=":
+		if *rule.CritThreshold != 0 {
+			if value < *rule.CritThreshold {
+				rule.Severity = "crit"
+			} else if *rule.WarnThreshold != 0 {
+				if value < *rule.WarnThreshold {
+					rule.Severity = "warn"
+				} else {
+					rule.Severity = "info"
+				}
+			} else {
+				rule.Severity = "info"
+			}
+		} else {
+			rule.Severity = "info"
+		}
+	}
+	fmt.Printf("rule.Severity: %v\n", rule.Severity)
+	return rule.Severity
+}
+
 // getCurrentValue 從指標數據中獲取當前值和時間戳
 func (c *Service) GetCurrentValue(metricName string, metrics map[string]interface{}) (float64, int64, error) {
 	data, ok := metrics[metricName].([]map[string]interface{})

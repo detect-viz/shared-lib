@@ -144,9 +144,12 @@ func (m *RotateManager) Start() error {
 			continue
 		}
 
-		if err := m.scheduleTask(task); err != nil {
+		id, err := m.scheduleTask(task)
+		if err != nil {
 			return err
 		}
+
+		m.logger.Info("已排程輪轉任務", zap.String("job_id", task.JobID), zap.String("schedule", task.RotateSetting.Schedule), zap.Int("entry_id", int(id)))
 	}
 
 	m.cron.Start()
@@ -159,15 +162,17 @@ func (m *RotateManager) Stop() {
 }
 
 // scheduleTask 排程任務
-func (m *RotateManager) scheduleTask(task common.RotateTask) error {
-	_, err := m.cron.AddFunc(task.RotateSetting.Schedule, func() {
+func (m *RotateManager) scheduleTask(task common.RotateTask) (cron.EntryID, error) {
+	id, err := m.cron.AddFunc(task.RotateSetting.Schedule, func() {
 		if err := m.RunTask(task); err != nil {
 			m.logger.Error("執行輪轉任務失敗",
 				zap.String("job_id", task.JobID),
+				zap.String("source", task.SourcePath),
+				zap.String("dest", task.DestPath),
 				zap.Error(err))
 		}
 	})
-	return err
+	return id, err
 }
 
 // cleanOldFiles 清理舊檔案
@@ -177,7 +182,7 @@ func (m *RotateManager) cleanOldFiles(task common.RotateTask) error {
 		return err
 	}
 
-	maxAge := task.RotateSetting.MaxAge
+	maxAge := task.RotateSetting.MaxAge * 86400
 	now := time.Now()
 
 	for _, file := range files {

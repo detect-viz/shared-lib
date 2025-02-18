@@ -1,4 +1,4 @@
-CREATE TABLE `alert_rules_contacts` (
+CREATE TABLE `alert_rule_contacts` (
   `alert_rule_id` bigint NOT NULL,
   `alert_contact_id` bigint NOT NULL,
   UNIQUE KEY `uk_rule_contact` (`alert_rule_id`,`alert_contact_id`),

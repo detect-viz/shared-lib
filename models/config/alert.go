@@ -2,17 +2,13 @@ package config
 
 // AlertConfig 告警配置
 type AlertConfig struct {
-	Enabled      bool `mapstructure:"enabled"`
-	Timeout      int  `mapstructure:"timeout"`
-	NotifyPeriod int  `mapstructure:"notify_period"`
-	WorkPath     struct {
-		Sent       string // 待轉換的觸發日誌目錄
-		Notify     string // 通知目錄
-		Silence    string // 靜音目錄
-		Unresolved string // 未解決目錄
-		Resolved   string // 已解決目錄
-	}
-	AlertCodes struct {
+	Enabled      bool   `mapstructure:"enabled"`
+	Timeout      int    `mapstructure:"timeout"`
+	NotifyPeriod int    `mapstructure:"notify_period"`
+	MigratePath  string `mapstructure:"migrate_path"`
+	WorkPath     string `mapstructure:"work_path"` // 工作路徑
+	Rotate       rotate `mapstructure:"rotate"`
+	AlertCodes   struct {
 		Level struct {
 			Crit Code `yaml:"crit"`
 			Warn Code `yaml:"warn"`

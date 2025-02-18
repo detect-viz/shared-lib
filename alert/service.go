@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"shared-lib/models"
+	"shared-lib/models/common"
 
 	"os"
 	"path/filepath"
@@ -18,87 +19,196 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	SentPath       = "sent"       // 待轉換的觸發日誌目錄
+	NotifyPath     = "notify"     // 通知目錄
+	SilencePath    = "silence"    // 靜音目錄
+	UnresolvedPath = "unresolved" // 未解決目錄
+	ResolvedPath   = "resolved"   // 已解決目錄
+)
+
 // Service 告警服務
 type Service struct {
 	config       models.AlertConfig // 只使用自己的配置
-	rules        map[string][]models.CheckRule
+	rules        map[string]map[string][]models.CheckRule
 	logger       interfaces.Logger
+	logMgr       interfaces.LogManager
 	db           interfaces.Database
-	parser       interfaces.Parser
 	stateManager *AlertStateManager
 }
 
 // NewService 創建告警服務
-func NewService(config models.AlertConfig, logSvc interfaces.Logger, db interfaces.Database) *Service {
+func NewService(config models.AlertConfig, db interfaces.Database, logSvc interfaces.Logger, logMgr interfaces.LogManager) *Service {
 	logger := logSvc.With(zap.String("module", "alert"))
-	rules := make(map[string][]models.CheckRule)
-	//TODO: 從資料庫獲取規則
+	alertService := &Service{
+		config: config,
 
-	return &Service{
-		config:       config,
-		rules:        rules,
 		logger:       logger,
+		logMgr:       logMgr,
 		db:           db,
 		stateManager: &AlertStateManager{db: db},
 	}
-}
 
-// InitAlertDirs 初始化告警服務所需目錄
-func (s *Service) InitAlertDirs() error {
-
-	dirs := []string{
-		s.config.WorkPath.Sent,
-		s.config.WorkPath.Notify,
-		s.config.WorkPath.Silence,
-		s.config.WorkPath.Unresolved,
-		s.config.WorkPath.Resolved,
+	// TODO: 從資料庫獲取規則
+	allCheckRules := make(map[string]map[string][]models.CheckRule)
+	checkRules := make(map[string][]models.CheckRule)
+	alertRules, err := db.GetAlertRules()
+	if err != nil {
+		logger.Error("獲取告警規則失敗", zap.Error(err))
+		return nil
 	}
 
-	for _, dir := range dirs {
-		if dir == "" {
-			continue
-		}
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			s.logger.Error("創建告警目錄失敗",
-				zap.String("path", dir),
-				zap.Error(err))
-			return err
+	for realm, rules := range alertRules {
+		allCheckRules[realm] = make(map[string][]models.CheckRule)
+		for _, rule := range rules {
+			// 2. alert_rules 扁平化而且轉換為 map[resource_name][]check_rules
+			var muteStart, muteEnd int64
+			if len(rule.MuteRules) > 0 {
+				muteStart = int64(rule.MuteRules[0].StartTime)
+				muteEnd = int64(rule.MuteRules[0].EndTime)
+				for _, mute := range rule.MuteRules[1:] {
+					if int64(mute.StartTime) < muteStart {
+						muteStart = int64(mute.StartTime)
+					}
+					if int64(mute.EndTime) > muteEnd {
+						muteEnd = int64(mute.EndTime)
+					}
+				}
+			}
+			for _, detail := range rule.AlertRuleDetails {
+				resourceGroupName, err := alertService.db.GetResourceGroupName(rule.ResourceGroupID)
+				if err != nil {
+					logger.Error("獲取資源群組名稱失敗", zap.Error(err))
+					continue
+				}
+				labels, err := alertService.db.GetCustomLabels(rule.ID)
+				if err != nil {
+					logger.Error("獲取自定義標籤失敗", zap.Error(err))
+					continue
+				}
+				contacts, err := alertService.db.GetAlertContacts(rule.ID)
+				if err != nil {
+					logger.Error("獲取通知對象失敗", zap.Error(err))
+					continue
+				}
+
+				check_rule := models.CheckRule{
+					// 動態檢查
+					UUID:         "", // 唯一識別碼
+					Timestamp:    0,  // 異常檢測時間
+					CurrentValue: 0,  // 異常數值
+					Severity:     "", // info / warn / crit
+					Status:       "", // alerting / normal / silenced
+
+					// 靜態資訊
+					RealmName:         realm,                // 告警規則所在的 realm
+					ResourceGroupID:   rule.ResourceGroupID, // 資源群組 ID
+					ResourceGroupName: resourceGroupName,    // 資源群組
+					ResourceName:      detail.ResourceName,  // 監控的主機/設備
+					PartitionName:     detail.PartitionName, // 分區名稱 (可選)
+					MetricName:        rule.MetricRule.MetricName,
+					CheckType:         rule.MetricRule.CheckType,
+					Operator:          rule.MetricRule.Operator,
+					InfoThreshold:     rule.InfoThreshold,
+					WarnThreshold:     rule.WarnThreshold,
+					CritThreshold:     rule.CritThreshold,
+					Unit:              rule.MetricRule.Unit,
+					Duration:          *rule.Duration,      // 異常持續時間
+					RuleID:            rule.ID,             // 關聯的告警規則 ID
+					RuleName:          rule.Name,           // 規則名稱
+					SilenceStart:      detail.SilenceStart, // 靜音開始時間
+					SilenceEnd:        detail.SilenceEnd,   // 靜音結束時間
+					MuteStart:         &muteStart,          // 抑制開始時間(最早)
+					MuteEnd:           &muteEnd,            // 抑制結束時間(最晚)
+					Labels:            labels,              // 其他標籤
+					Contacts:          contacts,            // 通知對象
+				}
+
+				checkRules[detail.ResourceName] = append(checkRules[detail.ResourceName], check_rule)
+				allCheckRules[realm][detail.ResourceName] = append(allCheckRules[realm][detail.ResourceName], check_rule)
+			}
 		}
 	}
-
-	return nil
+	// json, _ := json.Marshal(allCheckRules)
+	// fmt.Printf("allCheckRules: \n%v\n", string(json))
+	alertService.rules = allCheckRules
+	return alertService
 }
 
 // Init 初始化服務
 func (s *Service) Init() error {
-	if err := s.InitAlertDirs(); err != nil {
-		return fmt.Errorf("初始化目錄失敗: %w", err)
+	s.db.LoadAlertMigrate(s.config.MigratePath)
+	// 初始化目錄
+	workDir := filepath.Join(s.config.WorkPath, ResolvedPath)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		s.logger.Error("創建通知目錄失敗",
+			zap.String("path", workDir),
+			zap.Error(err))
+		return err
 	}
 
-	s.logger.Info("告警服務初始化完成")
+	// 註冊輪轉任務
+	if s.config.Rotate.Enabled {
+		task := common.RotateTask{
+			JobID:      "notify_rotate_" + workDir,
+			SourcePath: workDir,
+			DestPath:   workDir,
+			RotateSetting: common.RotateSetting{
+				Schedule:            "0 0 1 * * *",
+				MaxAge:              time.Duration(s.config.Rotate.MaxAge),
+				MaxSizeMB:           s.config.Rotate.MaxSizeMB,
+				CompressEnabled:     true,
+				CompressMatchRegex:  "*${YYYYMMDD}*.log",
+				CompressOffsetHours: 2,
+				CompressSaveRegex:   "${YYYYMMDD}.tar.gz",
+				MinDiskFreeMB:       300,
+			},
+		}
+
+		if err := s.logMgr.RegisterRotateTask(task); err != nil {
+			return fmt.Errorf("註冊輪轉任務失敗: %w", err)
+		}
+		s.logger.Info("已註冊通知日誌輪轉任務",
+			zap.String("source", task.SourcePath),
+			zap.String("dest", task.DestPath))
+	}
+
+	s.logger.Info("通知服務初始化完成")
 	return nil
 }
 
 // ProcessFile 處理檔案
 func (s *Service) ProcessFile(file models.FileInfo, metrics map[string][]map[string]interface{}) error {
-	// 確保目錄存在
-	if err := s.InitAlertDirs(); err != nil {
-		return err
-	}
 
+	// json, _ := json.Marshal(s.rules)
+	// fmt.Printf("rules: %v\n", string(json))
+	fmt.Printf("file.Realm: %v\n", file.Realm)
+	fmt.Printf("file.Host: %v\n", file.Host)
 	// 檢查規則是否存在
-	rules, ok := s.rules[file.Host]
+	rules, ok := s.rules[file.Realm][file.Host]
 	if !ok || len(rules) == 0 {
+		s.logger.Debug("找不到對應的規則", zap.String("host", file.Host))
 		return nil
 	}
 
 	var exceeded bool
 	// 檢查每個規則
 	for _, rule := range rules {
-		key := fmt.Sprintf("%s:%s", rule.Metric, rule.ResourceName)
+		rule.UUID = uuid.New().String()
+		rule.Timestamp = time.Now().Unix()
+		var key string
+		if rule.MetricName == "user_usage" || rule.MetricName == "system_usage" {
+			key = fmt.Sprintf("%s:total", rule.MetricName)
+		} else if rule.MetricName == "mem_usage" {
+			key = rule.MetricName
+		} else {
+			key = fmt.Sprintf("%v:%v", rule.MetricName, rule.PartitionName)
+		}
+
 		metricData, ok := metrics[key]
 		if !ok {
-			continue // 找不到對應的指標數據，跳過此規則
+			s.logger.Debug("找不到對應的指標數據", zap.String("key", key))
+			continue
 		}
 		exceeded = s.Check(rule, file, metricData)
 
@@ -125,17 +235,19 @@ func (s *Service) ProcessFile(file models.FileInfo, metrics map[string][]map[str
 			}
 
 			// 轉換為 TriggerLog
+			json, _ := json.Marshal(rule)
+			fmt.Printf("TriggerLog rule: \n%v\n", string(json))
 			trigger := s.convertCheckRuleToTriggerLog(&rule)
 
 			// 根據通知狀態決定路徑
 			var logPath string
 			switch rule.NotifyStatus {
 			case "muting":
-				logPath = filepath.Join(s.config.WorkPath.Unresolved, s.generateLogName(&trigger))
+				logPath = filepath.Join(s.config.WorkPath, UnresolvedPath, s.generateLogName(&trigger))
 			case "pending":
-				logPath = filepath.Join(s.config.WorkPath.Silence, s.generateLogName(&trigger))
+				logPath = filepath.Join(s.config.WorkPath, SilencePath, s.generateLogName(&trigger))
 			case "alerting":
-				logPath = filepath.Join(s.config.WorkPath.Sent, s.generateLogName(&trigger))
+				logPath = filepath.Join(s.config.WorkPath, SentPath, s.generateLogName(&trigger))
 			}
 
 			if err := s.writeTriggeredLog(logPath, &trigger); err != nil {
@@ -149,90 +261,6 @@ func (s *Service) ProcessFile(file models.FileInfo, metrics map[string][]map[str
 		}
 	}
 	return nil
-}
-
-// ConvertToCheckRule 將 AlertRule 轉換為扁平的 CheckRule 格式
-func (s *Service) ConvertToCheckRule(rule models.AlertRule) (*models.CheckRule, error) {
-	// 1. 獲取 MetricRule 資訊
-	var metricRule models.MetricRule
-	if rule.MetricRule.ID != 0 {
-		metricRule = rule.MetricRule
-	} else {
-		mr, err := s.db.GetMetricRule(rule.MetricRuleID)
-		if err != nil {
-			return nil, err
-		}
-		metricRule = mr
-	}
-
-	// 2. 獲取 RuleDetail 資訊
-	var resourceName string
-	var partitionName *string
-	if len(rule.AlertRuleDetails) > 0 {
-		detail := rule.AlertRuleDetails[0]
-		resourceName = detail.ResourceName
-		partitionName = detail.PartitionName
-	} else {
-		details, err := s.db.GetAlertRuleDetails(rule.ID)
-		if err != nil {
-			return nil, err
-		}
-		if len(details) > 0 {
-			resourceName = details[0].ResourceName
-			partitionName = details[0].PartitionName
-		}
-	}
-
-	// 3. 構建 CheckRule
-	checkRule := &models.CheckRule{
-		UUID:          fmt.Sprintf("%d", rule.ID),
-		ResourceGroup: fmt.Sprintf("%d", rule.ResourceGroupID),
-		ResourceName:  resourceName,
-		PartitionName: partitionName,
-		Metric:        metricRule.MetricName,
-		Unit:          metricRule.Unit,
-		Duration:      *rule.Duration,
-		RuleID:        rule.ID,
-		RuleName:      rule.Name,
-		Status:        "alerting",
-		NotifyStatus:  "pending",
-		Labels:        make(models.JSONMap),
-	}
-
-	// 4. 設置閾值和嚴重程度
-	if rule.CritThreshold != nil {
-		checkRule.Threshold = *rule.CritThreshold
-		checkRule.Severity = "crit"
-	} else if rule.WarnThreshold != nil {
-		checkRule.Threshold = *rule.WarnThreshold
-		checkRule.Severity = "warn"
-	} else if rule.InfoThreshold != nil {
-		checkRule.Threshold = *rule.InfoThreshold
-		checkRule.Severity = "info"
-	}
-
-	// 5. 添加標籤資訊
-	labels, err := s.db.GetCustomLabels(rule.ID)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range labels {
-		checkRule.Labels[k] = v
-	}
-
-	// 6. 添加靜音時間
-	if len(rule.MuteRules) > 0 {
-		mute := rule.MuteRules[0]
-		startTime := int64(mute.StartTime)
-		endTime := int64(mute.EndTime)
-		checkRule.SilenceStart = &startTime
-		checkRule.SilenceEnd = &endTime
-		if checkRule.Status == "alerting" {
-			checkRule.Status = "silenced"
-		}
-	}
-
-	return checkRule, nil
 }
 
 // generateLogName 產生日誌檔名
@@ -258,9 +286,9 @@ func (s *Service) generateLogName(rule interface{}) string {
 	if timestamp == 0 {
 		timestamp = time.Now().Unix()
 	}
-
-	return fmt.Sprintf("%d_%s_%s_%s_%s.log",
-		timestamp,
+	dateStr := time.Unix(timestamp, 0).Format("20060102150405")
+	return fmt.Sprintf("%s_%s_%s_%s_%s.log",
+		dateStr,
 		resourceName,
 		ruleID,
 		uuid,
@@ -269,10 +297,6 @@ func (s *Service) generateLogName(rule interface{}) string {
 
 // ProcessTriggers 批次處理觸發日誌
 func (s *Service) ProcessTriggers() error {
-	// 確保目錄存在
-	if err := s.InitAlertDirs(); err != nil {
-		return fmt.Errorf("初始化目錄失敗: %v", err)
-	}
 
 	// 1. 讀取 sent_path 的觸發日誌
 	triggers, err := s.readTriggerLogs()
@@ -314,7 +338,7 @@ func (s *Service) ProcessTriggers() error {
 
 // readTriggerLogs 讀取觸發日誌
 func (s *Service) readTriggerLogs() ([]models.TriggerLog, error) {
-	pattern := filepath.Join(s.config.WorkPath.Sent, "*_trigger.log")
+	pattern := filepath.Join(s.config.WorkPath, SentPath, "*.log")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, err
@@ -405,13 +429,14 @@ func (s *Service) createNotification(key string, triggers []models.TriggerLog) m
 // writeNotifications 寫入通知日誌
 func (s *Service) writeNotifications(notifications []models.NotificationLog) error {
 	for _, notification := range notifications {
-		filename := fmt.Sprintf("%d_%s_%s_%s_%s.log",
-			notification.Timestamp,
+		dateStr := time.Unix(notification.Timestamp, 0).Format("20060102150405")
+		filename := fmt.Sprintf("%s_%s_%s_%s_%s.log",
+			dateStr,
 			notification.ContactName,
 			notification.ChannelType,
 			notification.UUID,
 			notification.Status)
-		path := filepath.Join(s.config.WorkPath.Notify, filename)
+		path := filepath.Join(s.config.WorkPath, NotifyPath, filename)
 
 		if err := s.writeNotification(path, notification); err != nil {
 			s.logger.Error("寫入通知日誌失敗",
@@ -426,8 +451,8 @@ func (s *Service) writeNotifications(notifications []models.NotificationLog) err
 // archiveTriggers 歸檔觸發日誌
 func (s *Service) archiveTriggers(triggers []models.TriggerLog) error {
 	for _, trigger := range triggers {
-		oldPath := filepath.Join(s.config.WorkPath.Sent, s.generateLogName(&trigger))
-		newPath := filepath.Join(s.config.WorkPath.Unresolved, s.generateLogName(&trigger))
+		oldPath := filepath.Join(s.config.WorkPath, SentPath, s.generateLogName(&trigger))
+		newPath := filepath.Join(s.config.WorkPath, UnresolvedPath, s.generateLogName(&trigger))
 
 		if err := os.Rename(oldPath, newPath); err != nil {
 			s.logger.Error("移動觸發日誌失敗",
@@ -543,34 +568,32 @@ func (s *Service) writeWithLock(path string, data []byte) error {
 func (s *Service) convertCheckRuleToTriggerLog(checkRule *models.CheckRule) models.TriggerLog {
 	now := time.Now().Unix()
 
-	// 獲取聯絡人資訊
-	contacts, err := s.db.GetAlertContacts(checkRule.RuleID)
-	if err != nil {
-		s.logger.Error("獲取聯絡人失敗",
-			zap.String("rule_id", fmt.Sprintf("%d", checkRule.RuleID)),
-			zap.Error(err))
+	// 檢查 CurrentThreshold 是否為 nil
+	var threshold float64
+	if checkRule.CurrentThreshold != nil {
+		threshold = *checkRule.CurrentThreshold
 	}
 
 	trigger := models.TriggerLog{
-		UUID:             checkRule.UUID,
-		Timestamp:        now,
-		FirstTriggerTime: now,
-		RuleID:           checkRule.RuleID,
-		RuleName:         checkRule.RuleName,
-		ResourceGroup:    checkRule.ResourceGroup,
-		ResourceName:     checkRule.ResourceName,
-		PartitionName:    checkRule.PartitionName,
-		Metric:           checkRule.Metric,
-		Value:            checkRule.Value,
-		Threshold:        checkRule.Threshold,
-		Unit:             checkRule.Unit,
-		Severity:         checkRule.Severity,
-		Duration:         checkRule.Duration,
-		Status:           checkRule.Status,
-		SilenceStart:     checkRule.SilenceStart,
-		SilenceEnd:       checkRule.SilenceEnd,
-		Labels:           checkRule.Labels,
-		Contacts:         contacts,
+		UUID:              checkRule.UUID,
+		Timestamp:         now,
+		FirstTriggerTime:  now,
+		RuleID:            checkRule.RuleID,
+		RuleName:          checkRule.RuleName,
+		ResourceGroupName: checkRule.ResourceGroupName,
+		ResourceName:      checkRule.ResourceName,
+		PartitionName:     checkRule.PartitionName,
+		MetricName:        checkRule.MetricName,
+		Value:             checkRule.CurrentValue,
+		Threshold:         threshold, // 使用安全的值
+		Unit:              checkRule.Unit,
+		Severity:          checkRule.Severity,
+		Duration:          checkRule.Duration,
+		Status:            checkRule.Status,
+		SilenceStart:      checkRule.SilenceStart,
+		SilenceEnd:        checkRule.SilenceEnd,
+		Labels:            checkRule.Labels,
+		Contacts:          checkRule.Contacts,
 	}
 	return trigger
 }
@@ -612,11 +635,11 @@ func (s *Service) Check(rule models.CheckRule, file models.FileInfo, metrics []m
 		var logPath string
 		switch rule.NotifyStatus {
 		case "muting":
-			logPath = filepath.Join(s.config.WorkPath.Unresolved, s.generateLogName(&trigger))
+			logPath = filepath.Join(s.config.WorkPath, UnresolvedPath, s.generateLogName(&trigger))
 		case "pending":
-			logPath = filepath.Join(s.config.WorkPath.Silence, s.generateLogName(&trigger))
+			logPath = filepath.Join(s.config.WorkPath, SilencePath, s.generateLogName(&trigger))
 		case "alerting":
-			logPath = filepath.Join(s.config.WorkPath.Sent, s.generateLogName(&trigger))
+			logPath = filepath.Join(s.config.WorkPath, SentPath, s.generateLogName(&trigger))
 		}
 
 		if err := s.writeTriggeredLog(logPath, &trigger); err != nil {

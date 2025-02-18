@@ -22,7 +22,6 @@ type Config interface {
 	GetNotifyConfig() models.NotifyConfig
 	GetAlertConfig() models.AlertConfig
 	GetDatabaseConfig() models.DatabaseConfig
-	GetMetricSpecConfig() models.MetricSpecConfig
 
 	// 原始配置訪問
 	GetRawConfig() *viper.Viper

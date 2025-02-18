@@ -1,7 +1,6 @@
 package databases
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -12,62 +11,66 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
+// MySQL 資料庫連接器
 type MySQL struct {
-	db *gorm.DB
+	config *models.DatabaseConfig
+	db     *gorm.DB
+	logger interfaces.Logger
 }
 
-func NewMySQL(db *gorm.DB) *MySQL {
-	return &MySQL{db: db}
-}
-
+// NewDatabase 創建新的資料庫連接
 func NewDatabase(cfg *models.DatabaseConfig, logger interfaces.Logger) *MySQL {
-	// get env config
-	host := cfg.MySQL.Host
-	port := cfg.MySQL.Port
-	user := cfg.MySQL.User
-	password := cfg.MySQL.Password
-	params := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local", user, password, host, port, cfg.MySQL.DBName)
-
-	err := errors.New("mock error")
-	var db *gorm.DB
-	for err != nil {
-		db, err = gorm.Open(mysql.Open(params), &gorm.Config{
-			DisableForeignKeyConstraintWhenMigrating: true,
-		})
-		time.Sleep(1 * time.Second)
-
-		if cfg.MySQL.Level == "debug" {
-			db = db.Debug()
-		}
-	}
-
-	sqlDB, err := db.DB()
-	if err != nil {
-		logger.Error(
-			fmt.Sprintf("mysql [%v] connection error: %v", params, err.Error()),
-			zap.String("service", "mysql"),
-		)
+	if cfg == nil {
+		logger.Error("資料庫配置為空")
 		return nil
 	}
 
-	// SetMaxIdleConns sets the maximum number of connections in the idle connection pool.
-	sqlDB.SetMaxIdleConns(int(cfg.MySQL.MaxIdle))
-
-	// SetMaxOpenConns sets the maximum number of open connections to the database.
-	sqlDB.SetMaxOpenConns(int(cfg.MySQL.MaxOpen))
-
-	// SetConnMaxLifetime sets the maximum amount of time a connection may be reused.
-	lifeTime, _ := time.ParseDuration(cfg.MySQL.MaxLife)
-	sqlDB.SetConnMaxLifetime(lifeTime)
-
-	logger.Info(
-		fmt.Sprintf("mysql [%v] connection success", cfg.MySQL.DBName),
-		zap.String("service", "mysql"),
+	// 構建連接字串
+	params := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		cfg.MySQL.User,
+		cfg.MySQL.Password,
+		cfg.MySQL.Host,
+		cfg.MySQL.Port,
+		cfg.MySQL.DBName,
 	)
 
-	return &MySQL{db: db}
+	// 建立連接
+	db, err := gorm.Open(mysql.Open(params), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		logger.Error("資料庫連接失敗",
+			zap.String("host", cfg.MySQL.Host),
+			zap.Error(err))
+		return nil
+	}
+
+	// 設置連接池
+	sqlDB, err := db.DB()
+	if err != nil {
+		logger.Error("獲取資料庫實例失敗", zap.Error(err))
+		return nil
+	}
+
+	sqlDB.SetMaxIdleConns(int(cfg.MySQL.MaxIdle))
+	sqlDB.SetMaxOpenConns(int(cfg.MySQL.MaxOpen))
+
+	if lifeTime, err := time.ParseDuration(cfg.MySQL.MaxLife); err == nil {
+		sqlDB.SetConnMaxLifetime(lifeTime)
+	}
+
+	logger.Info("資料庫連接成功",
+		zap.String("host", cfg.MySQL.Host),
+		zap.String("database", cfg.MySQL.DBName))
+
+	return &MySQL{
+		config: cfg,
+		db:     db,
+		logger: logger,
+	}
 }
 
 // GetMetricRule 獲取指標規則定義
@@ -86,8 +89,13 @@ func (m *MySQL) GetAlertRuleDetails(ruleID int64) ([]models.AlertRuleDetail, err
 
 // GetCustomLabels 獲取規則相關的標籤
 func (m *MySQL) GetCustomLabels(ruleID int64) (map[string]string, error) {
+	var ruleLabelIDs []int64
+	err := m.db.Model(&models.AlertRuleLabel{}).Where("rule_id = ?", ruleID).Pluck("label_id", &ruleLabelIDs).Error
+	if err != nil {
+		return nil, err
+	}
 	var labels []models.Label
-	err := m.db.Where("resource_id = ? AND type = ?", ruleID, "rule").Find(&labels).Error
+	err = m.db.Model(&models.Label{}).Where("id IN (?)", ruleLabelIDs).Find(&labels).Error
 	if err != nil {
 		return nil, err
 	}
@@ -126,24 +134,41 @@ func (m *MySQL) SaveAlertState(state models.AlertState) error {
 
 // GetAlertContacts 獲取規則的聯絡人列表
 func (m *MySQL) GetAlertContacts(ruleID int64) ([]models.AlertContact, error) {
+	var contactIDs []int64
 	var contacts []models.AlertContact
 
-	// 1. 查詢規則關聯的聯絡人
-	err := m.db.Table("alert_rule_contacts").
-		Select("alert_contacts.*").
-		Joins("LEFT JOIN alert_contacts ON alert_rule_contacts.contact_id = alert_contacts.id").
-		Where("alert_rule_contacts.rule_id = ? AND alert_contacts.status = ?", ruleID, "enabled").
-		Find(&contacts).Error
-
+	// 1. 獲取聯絡人 IDs
+	err := m.db.Model(&models.AlertRuleContact{}).
+		Where("alert_rule_id = ?", ruleID).
+		Pluck("alert_contact_id", &contactIDs).Error
 	if err != nil {
-		return nil, fmt.Errorf("查詢聯絡人失敗: %v", err)
+		return nil, err
 	}
 
-	return contacts, nil
+	// 2. 獲取聯絡人詳情並預加載 Severities
+	err = m.db.Model(&models.AlertContact{}).
+		Preload(clause.Associations).
+		Where("id IN (?)", contactIDs).
+		Find(&contacts).Error
+
+	for i, contact := range contacts {
+		var lvl []models.AlertContactSeverity
+		err = m.db.Model(&models.AlertContactSeverity{}).
+			Where("alert_contact_id = ?", contact.ID).
+			Find(&lvl).Error
+		if err != nil {
+			return nil, err
+		}
+
+		contacts[i].Severities = lvl
+	}
+
+	return contacts, err
 }
 
 // WriteTriggeredLog 寫入觸發日誌
 func (m *MySQL) WriteTriggeredLog(trigger models.TriggerLog) error {
+
 	return m.db.Create(&trigger).Error
 }
 
@@ -225,7 +250,7 @@ func (m *MySQL) GetAlertRuleByID(ruleID int64) (models.AlertRule, error) {
 // GetAlertRulesByRealm 獲取指定 Realm 的告警規則
 func (m *MySQL) GetAlertRulesByRealm(realm string) ([]models.AlertRule, error) {
 	var rules []models.AlertRule
-	return rules, m.db.Where("realm = ?", realm).Find(&rules).Error
+	return rules, m.db.Where("realm_name = ?", realm).Find(&rules).Error
 }
 
 // UpdateAlertRule 更新告警規則
@@ -242,4 +267,31 @@ func (m *MySQL) UpdateContact(contact *models.AlertContact) error {
 func (m *MySQL) GetContactByID(id int64) (models.AlertContact, error) {
 	var contact models.AlertContact
 	return contact, m.db.First(&contact, id).Error
+}
+
+// GetAlertRules 獲取所有告警規則，並按 realm 分組
+func (m *MySQL) GetAlertRules() (map[string][]models.AlertRule, error) {
+	var rules []models.AlertRule
+
+	err := m.db.Preload(clause.Associations).
+		Where("enabled = ? AND deleted_at IS NULL", true).
+		Find(&rules).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	// 按 realm 分組
+	rulesByRealm := make(map[string][]models.AlertRule)
+	for _, rule := range rules {
+		rulesByRealm[rule.RealmName] = append(rulesByRealm[rule.RealmName], rule)
+	}
+
+	return rulesByRealm, nil
+}
+
+// GetResourceGroupName 獲取資源群組名稱
+func (m *MySQL) GetResourceGroupName(id int64) (string, error) {
+	var name string
+	return name, m.db.Table("resource_groups").Where("id = ?", id).Select("name").Scan(&name).Error
 }
