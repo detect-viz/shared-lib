@@ -6,7 +6,6 @@
 ```
 share/
 ├── alert/         # 告警核心邏輯
-├── api/           # API 處理器
 ├── databases/     # 資料庫操作封裝
 ├── label/         # 標籤管理
 ├── logger/        # 日誌處理
