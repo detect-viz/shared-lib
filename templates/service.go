@@ -5,24 +5,27 @@ import (
 	"encoding/json"
 	"text/template"
 
-	"github.com/detect-viz/shared-lib/interfaces"
+	"github.com/detect-viz/shared-lib/infra/logger"
 	"github.com/detect-viz/shared-lib/models"
+	"github.com/google/wire"
 )
 
+var TemplateSet = wire.NewSet(NewService, wire.Bind(new(Service), new(*serviceImpl)))
+
 // Service 處理格式轉換
-type Service struct {
-	logger interfaces.Logger
+type serviceImpl struct {
+	logger logger.Logger
 }
 
 // NewService 創建模板服務
-func NewService(logger interfaces.Logger) *Service {
-	return &Service{
+func NewService(logger logger.Logger) *serviceImpl {
+	return &serviceImpl{
 		logger: logger,
 	}
 }
 
 // 動態渲染模板
-func (s *Service) RenderMessage(t models.AlertTemplate, data map[string]interface{}) (string, error) {
+func (s *serviceImpl) RenderMessage(t models.Template, data map[string]interface{}) (string, error) {
 	tmpl, err := template.New("alert").Parse(t.Message)
 	if err != nil {
 		return "", err
@@ -38,7 +41,7 @@ func (s *Service) RenderMessage(t models.AlertTemplate, data map[string]interfac
 }
 
 // RenderJSON 格式化為 JSON
-func (s *Service) RenderJSON(data interface{}) (string, error) {
+func (s *serviceImpl) RenderJSON(data interface{}) (string, error) {
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return "", err

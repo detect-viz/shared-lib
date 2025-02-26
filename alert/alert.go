@@ -1,18 +1,26 @@
 package alert
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
+	"github.com/detect-viz/shared-lib/auth/keycloak"
+	"github.com/detect-viz/shared-lib/contacts"
+	"github.com/detect-viz/shared-lib/infra/logger"
+	"github.com/detect-viz/shared-lib/infra/scheduler"
+	"github.com/detect-viz/shared-lib/labels"
 	"github.com/detect-viz/shared-lib/models"
 	"github.com/detect-viz/shared-lib/models/common"
+	"github.com/detect-viz/shared-lib/mutes"
+	"github.com/detect-viz/shared-lib/notifier"
+	"github.com/detect-viz/shared-lib/rules"
+	"github.com/detect-viz/shared-lib/storage/mysql"
+	"github.com/detect-viz/shared-lib/templates"
 
-	"os"
-	"path/filepath"
 	"time"
-
-	"github.com/detect-viz/shared-lib/interfaces"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -22,91 +30,155 @@ import (
 
 // Service 告警服務
 type Service struct {
-	config          models.AlertConfig
-	mapping         models.MappingConfig
-	globalRules     map[string]map[string]map[string][]models.CheckRule
-	logger          interfaces.Logger
-	logMgr          interfaces.LogRotator
-	db              interfaces.Database
-	notify          interfaces.NotifyService
-	scheduler       interfaces.Scheduler
-	muteService     interfaces.MuteService
-	templateService interfaces.TemplateService
+	ruleService      rules.Service
+	muteService      mutes.Service
+	contactService   contacts.Service
+	notifyService    notifier.Service
+	schedulerService *scheduler.Service
+	templateService  templates.Service
+	labelService     labels.Service
+	config           models.AlertConfig
+	global           models.GlobalConfig
+	globalRules      map[string]map[string]map[string][]models.CheckRule
+	logger           logger.Logger
+	mysql            *mysql.Client
+	keycloak         *keycloak.Client
+}
+
+// ✅ 直接返回已注入的 `RuleService`
+func (s *Service) GetRuleService() rules.Service {
+	return s.ruleService
+}
+
+// ✅ 直接返回已注入的 `MuteService`
+func (s *Service) GetMuteService() mutes.Service {
+	return s.muteService
+}
+
+// ✅ 直接返回已注入的 `NotifyService`
+func (s *Service) GetNotifyService() notifier.Service {
+	return s.notifyService
+}
+
+// ✅ 直接返回已注入的 `ContactService`
+func (s *Service) GetContactService() contacts.Service {
+	return s.contactService
+}
+
+// ✅ 直接返回已注入的 `LabelService`
+func (s *Service) GetLabelService() labels.Service {
+	return s.labelService
 }
 
 // NewService 創建告警服務
 func NewService(
 	config models.AlertConfig,
-	mapping models.MappingConfig,
-	db interfaces.Database,
-	logSvc interfaces.Logger,
-	logMgr interfaces.LogRotator,
-	notify interfaces.NotifyService,
-	scheduler interfaces.Scheduler,
-	muteService interfaces.MuteService,
-	templateService interfaces.TemplateService,
+	global models.GlobalConfig,
+	mysqlClient *mysql.Client,
+	logSvc logger.Logger,
+	rule rules.Service,
+	mute mutes.Service,
+	keycloak *keycloak.Client,
+	notify notifier.Service,
+	contact contacts.Service,
+	scheduler *scheduler.Service,
+	template templates.Service,
+	label labels.Service,
 ) *Service {
 	logger := logSvc.With(zap.String("module", "alert"))
 	alertService := &Service{
-		config:          config,
-		mapping:         mapping,
-		logger:          logger,
-		logMgr:          logMgr,
-		db:              db,
-		notify:          notify,
-		scheduler:       scheduler,
-		muteService:     muteService,
-		templateService: templateService,
+		config:           config,
+		global:           global,
+		logger:           logger,
+		mysql:            mysqlClient,
+		ruleService:      rule,
+		muteService:      mute,
+		keycloak:         keycloak,
+		notifyService:    notify,
+		contactService:   contact,
+		schedulerService: scheduler,
+		templateService:  template,
+		labelService:     label,
 	}
 
+	alertService.mysql.LoadAlertMigrate(alertService.config.MigratePath)
+
+	// 註冊批次通知任務
+	alertService.registerNotifyTask()
+
+	allRules := alertService.getGlobalRules()
+	if len(allRules) == 0 {
+		alertService.logger.Warn("獲取告警規則為空")
+		return nil
+	}
+	alertService.logger.Info("獲取告警規則成功")
+	if alertService.logger.IsDebugMode() {
+		globalRules, _ := json.MarshalIndent(allRules, "", "\t")
+		os.Stdout.Write(globalRules)
+	}
+	alertService.globalRules = allRules
+
+	return alertService
+}
+
+// 獲取所有告警規則
+func (s *Service) getGlobalRules() map[string]map[string]map[string][]models.CheckRule {
 	//* 0. 初始化 [realm][resource][metric:partition]{rule}
 	allCheckRules := make(map[string]map[string]map[string][]models.CheckRule)
 
 	//* 1. 獲取規則
-	alertRules, err := db.GetAlertRules()
+	alertRules, err := s.mysql.GetRules()
 	if err != nil {
-		logger.Error("獲取告警規則失敗", zap.Error(err))
+		s.logger.Error("獲取告警規則失敗", zap.Error(err))
 		return nil
 	}
 
 	//* 2. 轉換規則
 	for realm, alert_rules := range alertRules {
-		//* 第一層
+		//* 第一層 - realm
 		allCheckRules[realm] = make(map[string]map[string][]models.CheckRule)
 
-		var resourceGroupName string
 		for _, alert_rule := range alert_rules {
-			resourceGroupName, err = db.GetResourceGroupName(alert_rule.ResourceGroupID)
+			resourceGroupName, err := s.mysql.GetResourceGroupName(alert_rule.ResourceGroupID)
 			if err != nil {
-				logger.Error("獲取資源群組名稱失敗", zap.Error(err))
+				s.logger.Error("獲取資源群組名稱失敗", zap.Error(err))
 				continue
 			}
-			//* 第二層
-			allCheckRules[realm][resourceGroupName] = make(map[string][]models.CheckRule)
 
-			var muteStart, muteEnd int64
-			if muteService.IsRuleMuted(alert_rule.ResourceGroupID, time.Now()) {
-				muteStart, muteEnd = muteService.GetMutePeriod(alert_rule.ResourceGroupID, time.Now())
-				logger.Debug("抑制規則啟用",
-					zap.Int64("mute_start", muteStart),
-					zap.Int64("mute_end", muteEnd))
-			}
 			for _, detail := range alert_rule.AlertRuleDetails {
-
-				labels, err := db.GetLabels(alert_rule.ID)
-				if err != nil {
-					logger.Error("獲取自定義標籤失敗", zap.Error(err))
-					continue
-				}
-				contacts, err := db.GetAlertContacts(alert_rule.ID)
-				if err != nil {
-					logger.Error("獲取通知對象失敗", zap.Error(err))
-					continue
+				//* 第二層 - resource
+				if _, ok := allCheckRules[realm][detail.ResourceName]; !ok {
+					allCheckRules[realm][detail.ResourceName] = make(map[string][]models.CheckRule)
 				}
 
-				alertState, err := db.GetAlertState(detail.ID)
+				var muteStart, muteEnd int64
+				if s.muteService.IsRuleMuted(alert_rule.ResourceGroupID, time.Now()) {
+					muteStart, muteEnd = s.muteService.GetMutePeriod(alert_rule.ResourceGroupID, time.Now())
+					s.logger.Debug("抑制規則啟用",
+						zap.Int64("mute_start", muteStart),
+						zap.Int64("mute_end", muteEnd))
+				}
+
+				labels, err := s.mysql.GetRuleLabels(alert_rule.ID)
 				if err != nil {
-					logger.Error("獲取告警狀態失敗", zap.Error(err))
+					s.logger.Error("獲取自定義標籤失敗", zap.Error(err))
+					continue
+				}
+
+				// Convert labels to JSONMap
+				labelsMap := make(models.JSONMap)
+				for key, value := range labels {
+					labelsMap[key] = value
+				}
+				contacts, err := s.contactService.GetContactsByRuleID(alert_rule.ID)
+				if err != nil {
+					s.logger.Error("獲取通知對象失敗", zap.Error(err))
+					continue
+				}
+
+				alertState, err := s.mysql.GetAlertState(detail.ID)
+				if err != nil {
+					s.logger.Error("獲取告警狀態失敗", zap.Error(err))
 					continue
 				}
 				//* 靜態資訊轉換
@@ -122,68 +194,69 @@ func NewService(
 					InfoThreshold:     alert_rule.InfoThreshold,
 					WarnThreshold:     alert_rule.WarnThreshold,
 					CritThreshold:     alert_rule.CritThreshold,
-					Unit:              alert_rule.MetricRule.Unit,
-					Duration:          *alert_rule.Duration,    // 異常持續時間
-					RuleID:            alert_rule.ID,           // 關聯的告警規則 ID
-					RuleName:          alert_rule.Name,         // 規則名稱
-					SilenceStart:      alertState.SilenceStart, // 靜音開始時間
-					SilenceEnd:        alertState.SilenceEnd,   // 靜音結束時間
-					MuteStart:         &muteStart,              // 抑制開始時間(最早)
-					MuteEnd:           &muteEnd,                // 抑制結束時間(最晚)
-					Labels:            labels,                  // 其他標籤
-					Contacts:          contacts,                // 通知對象
+					DisplayUnit:       alert_rule.MetricRule.DisplayUnit,
+					RawUnit:           alert_rule.MetricRule.RawUnit,
+					Scale:             alert_rule.MetricRule.Scale,
+
+					Duration:     *alert_rule.Duration,    // 異常持續時間
+					RuleID:       alert_rule.ID,           // 關聯的告警規則 ID
+					RuleName:     alert_rule.Name,         // 規則名稱
+					SilenceStart: alertState.SilenceStart, // 靜音開始時間
+					SilenceEnd:   alertState.SilenceEnd,   // 靜音結束時間
+					MuteStart:    &muteStart,              // 抑制開始時間(最早)
+					MuteEnd:      &muteEnd,                // 抑制結束時間(最晚)
+					Labels:       labelsMap,               // 其他標籤
+					Contacts:     contacts,                // 通知對象
 				}
 
-				//* 第三層
+				//* 第三層 - metric
 				var key string
-				if *detail.PartitionName != "" && *detail.PartitionName != "total" {
+				if detail.PartitionName != nil && *detail.PartitionName != "" && *detail.PartitionName != "total" {
+					check_rule.Tags = make(map[string]string)
+					check_rule.Tags[s.global.Tag.Base.Host] = detail.ResourceName
 					key = alert_rule.MetricRule.MetricName + ":" + *detail.PartitionName
+					tagkeys := strings.Split(alert_rule.MetricRule.Tags, ",")
+					tagValues := strings.Split(*detail.PartitionName, ",")
+					if len(tagkeys) != len(tagValues) {
+						s.logger.Error("標籤數量不匹配", zap.String("metric", alert_rule.MetricRule.MetricName), zap.String("partition", *detail.PartitionName))
+						continue
+					}
+					for i, tagKey := range tagkeys {
+						check_rule.Tags[tagKey] = tagValues[i]
+					}
 				} else {
 					key = alert_rule.MetricRule.MetricName
 				}
-				allCheckRules[realm][detail.ResourceName][key] = append(allCheckRules[realm][detail.ResourceName][key], check_rule)
+
+				allCheckRules[realm][detail.ResourceName][key] = append(
+					allCheckRules[realm][detail.ResourceName][key],
+					check_rule,
+				)
 			}
 		}
 	}
-	// json, _ := json.Marshal(allCheckRules)
-	// fmt.Printf("allCheckRules: \n%v\n", string(json))
-	alertService.globalRules = allCheckRules
-	return alertService
+	return allCheckRules
 }
 
-// Init 初始化服務
-func (s *Service) Init() error {
-	s.db.LoadAlertMigrate(s.config.MigratePath)
-	// 初始化目錄
-	unresolvedDir := filepath.Join(s.config.WorkPath, s.mapping.Code.State.Trigger.Unresolved.Name)
-	if err := os.MkdirAll(unresolvedDir, 0755); err != nil {
-		s.logger.Error("創建 unresolved 目錄失敗",
-			zap.String("path", unresolvedDir),
-			zap.Error(err))
-		return err
-	}
-
-	resolvedDir := filepath.Join(s.config.WorkPath, s.mapping.Code.State.Trigger.Resolved.Name)
-	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
-		s.logger.Error("創建 resolved 目錄失敗",
-			zap.String("path", resolvedDir),
-			zap.Error(err))
-		return err
-	}
-
-	// 註冊批次通知任務
+// 註冊批次通知任務
+func (s *Service) registerNotifyTask() error {
 	if s.config.NotifyPeriod > 0 {
-		job := models.SchedulerJob{
-			Name:    "batch_notify",
-			Spec:    fmt.Sprintf("@every %ds", s.config.NotifyPeriod),
-			Type:    "cron",
-			Enabled: true,
-			Func: func() {
-				s.ProcessNotifyLog()
+		job := common.Task{
+			Name:        "batch_notify",
+			Spec:        fmt.Sprintf("@every %ds", s.config.NotifyPeriod),
+			Type:        "cron",
+			Enabled:     true,
+			Timezone:    "Asia/Taipei",
+			Description: "批次通知任務",
+			RetryCount:  3,
+			RetryDelay:  10 * time.Second,
+			Duration:    10 * time.Second,
+			ExecFunc: func() error {
+				return s.ProcessNotifyLog()
 			},
 		}
 
-		if err := s.scheduler.RegisterCronJob(job); err != nil {
+		if err := s.schedulerService.RegisterTask(job); err != nil {
 			s.logger.Error("註冊批次通知任務失敗",
 				zap.Error(err),
 				zap.Int("period", s.config.NotifyPeriod))
@@ -194,33 +267,8 @@ func (s *Service) Init() error {
 			zap.Int("period", s.config.NotifyPeriod))
 	}
 
-	// 註冊輪轉任務
-	if s.config.Rotate.Enabled {
-		task := common.RotateTask{
-			JobID:      "notify_rotate_" + resolvedDir,
-			SourcePath: resolvedDir,
-			DestPath:   resolvedDir,
-			RotateSetting: common.RotateSetting{
-				Schedule:            "0 0 1 * * *",
-				MaxAge:              time.Duration(s.config.Rotate.MaxAge),
-				MaxSizeMB:           s.config.Rotate.MaxSizeMB,
-				CompressEnabled:     true,
-				CompressMatchRegex:  "*${YYYYMMDD}*.log",
-				CompressOffsetHours: 2,
-				CompressSaveRegex:   "${YYYYMMDD}.tar.gz",
-				MinDiskFreeMB:       300,
-			},
-		}
-
-		if err := s.scheduler.RegisterTask(task.JobID, task.RotateSetting.Schedule, s.logMgr); err != nil {
-			return fmt.Errorf("註冊輪轉任務失敗: %w", err)
-		}
-		s.logger.Info("已註冊通知日誌輪轉任務",
-			zap.String("source", task.SourcePath),
-			zap.String("dest", task.DestPath))
-	}
-
 	s.logger.Info("通知服務初始化完成")
+
 	return nil
 }
 
@@ -255,7 +303,7 @@ func (s *Service) Process(file models.FileInfo, metrics map[string][]map[string]
 			s.applySilence(&rule)
 			s.applyMute(&rule)
 
-			state, err := s.db.GetAlertState(rule.RuleDetailID)
+			state, err := s.mysql.GetAlertState(rule.RuleDetailID)
 			if err != nil {
 				s.logger.Error("獲取告警狀態失敗", zap.Error(err))
 				continue
@@ -291,7 +339,7 @@ func (s *Service) Process(file models.FileInfo, metrics map[string][]map[string]
 			}
 
 			// 更新 AlertState
-			err = s.db.SaveAlertState(state)
+			err = s.mysql.SaveAlertState(state)
 			if err != nil {
 				s.logger.Error("更新 AlertState 失敗", zap.Error(err))
 				continue
@@ -316,7 +364,7 @@ func (s *Service) writeTriggerLog(rule models.CheckRule, state models.AlertState
 	}
 
 	// **查詢是否已有異常記錄**
-	existingTrigger, err := s.db.GetActiveTriggerLog(rule.RuleID, rule.ResourceName, rule.MetricName)
+	existingTrigger, err := s.mysql.GetActiveTriggerLog(rule.RuleID, rule.ResourceName, rule.MetricName)
 	if err != nil {
 		s.logger.Error("查詢 TriggerLog 失敗",
 			zap.Int64("rule_id", rule.RuleID),
@@ -331,7 +379,7 @@ func (s *Service) writeTriggerLog(rule models.CheckRule, state models.AlertState
 		existingTrigger.Timestamp = time.Now().Unix()
 		existingTrigger.TriggerValue = state.LastTriggerValue
 		existingTrigger.Severity = rule.Severity
-		return s.db.UpdateTriggerLog(*existingTrigger)
+		return s.mysql.UpdateTriggerLog(*existingTrigger)
 	}
 
 	// **如果沒有異常記錄，則寫入新的 TriggerLog**
@@ -355,7 +403,7 @@ func (s *Service) writeTriggerLog(rule models.CheckRule, state models.AlertState
 		Contacts:         rule.Contacts,
 	}
 
-	return s.db.CreateTriggerLog(trigger)
+	return s.mysql.CreateTriggerLog(trigger)
 
 }
 
@@ -435,23 +483,23 @@ func (s *Service) checkThreshold(rule models.CheckRule, operator string, value f
 	switch operator {
 	case ">", ">=":
 		if rule.CritThreshold != nil && value > *rule.CritThreshold {
-			return true, s.mapping.Code.Severity.Crit.Name, rule.CritThreshold
+			return true, s.global.Code.Severity.Crit.Name, rule.CritThreshold
 		}
 		if rule.WarnThreshold != nil && value > *rule.WarnThreshold {
-			return true, s.mapping.Code.Severity.Warn.Name, rule.WarnThreshold
+			return true, s.global.Code.Severity.Warn.Name, rule.WarnThreshold
 		}
 		if rule.InfoThreshold != nil && value > *rule.InfoThreshold {
-			return true, s.mapping.Code.Severity.Info.Name, rule.InfoThreshold
+			return true, s.global.Code.Severity.Info.Name, rule.InfoThreshold
 		}
 	case "<", "<=":
 		if rule.CritThreshold != nil && value < *rule.CritThreshold {
-			return true, s.mapping.Code.Severity.Crit.Name, rule.CritThreshold
+			return true, s.global.Code.Severity.Crit.Name, rule.CritThreshold
 		}
 		if rule.WarnThreshold != nil && value < *rule.WarnThreshold {
-			return true, s.mapping.Code.Severity.Warn.Name, rule.WarnThreshold
+			return true, s.global.Code.Severity.Warn.Name, rule.WarnThreshold
 		}
 		if rule.InfoThreshold != nil && value < *rule.InfoThreshold {
-			return true, s.mapping.Code.Severity.Info.Name, rule.InfoThreshold
+			return true, s.global.Code.Severity.Info.Name, rule.InfoThreshold
 		}
 	}
 	return false, severity, nil
@@ -506,7 +554,7 @@ func (s *Service) groupTriggerLogs(triggers []models.TriggerLog, isResolved bool
 
 func (s *Service) writeResolvedLog(rule models.CheckRule, state models.AlertState) error {
 	// 確保已經有 TriggerLog
-	exists, err := s.db.CheckTriggerLogExists(rule.RuleDetailID, rule.ResourceName, rule.MetricName, state.FirstTriggerTime)
+	exists, err := s.mysql.CheckTriggerLogExists(rule.RuleDetailID, rule.ResourceName, rule.MetricName, state.FirstTriggerTime)
 	if err != nil {
 		return err
 	}
@@ -519,7 +567,7 @@ func (s *Service) writeResolvedLog(rule models.CheckRule, state models.AlertStat
 	}
 
 	// **更新 TriggerLog 狀態**
-	err = s.db.UpdateTriggerLogResolved(rule.RuleID, rule.ResourceName, rule.MetricName, state.LastTriggerTime)
+	err = s.mysql.UpdateTriggerLogResolved(rule.RuleID, rule.ResourceName, rule.MetricName, state.LastTriggerTime)
 	if err != nil {
 		s.logger.Error("更新 TriggerLog 為 resolved 失敗",
 			zap.Int64("rule_id", rule.RuleID),
@@ -535,23 +583,23 @@ func (s *Service) writeResolvedLog(rule models.CheckRule, state models.AlertStat
 //* ======================== 6.notify_log.go 通知日誌 ========================
 
 // 批次處理觸發日誌
-func (s *Service) ProcessNotifyLog() {
+func (s *Service) ProcessNotifyLog() error {
 	timestamp := time.Now().Unix()
 	successAlertCounter, failAlertCounter := 0, 0
 	successResolvedCounter, failResolvedCounter := 0, 0
 
 	// **1️⃣ 查詢異常通知**
-	triggerLogs, err := s.db.GetTriggerLogsForAlertNotify(timestamp)
+	triggerLogs, err := s.mysql.GetTriggerLogsForAlertNotify(timestamp)
 	if err != nil {
 		s.logger.Error("獲取待發送異常通知的 TriggerLog 失敗", zap.Error(err))
-		return
+		return err
 	}
 
 	// **2️⃣ 查詢恢復通知**
-	resolvedLogs, err := s.db.GetTriggerLogsForResolvedNotify(timestamp)
+	resolvedLogs, err := s.mysql.GetTriggerLogsForResolvedNotify(timestamp)
 	if err != nil {
 		s.logger.Error("獲取待發送恢復通知的 TriggerLog 失敗", zap.Error(err))
-		return
+		return err
 	}
 
 	// **3️⃣ 根據通知管道分組**
@@ -566,25 +614,25 @@ func (s *Service) ProcessNotifyLog() {
 		if sendErr != nil {
 			failAlertCounter++
 			s.logger.Error("發送異常通知失敗", zap.Error(sendErr))
-			notifyLog.NotifyState = s.mapping.Code.State.Notify.Failed.Name
+			notifyLog.NotifyState = s.global.Code.State.Notify.Failed.Name
 			notifyLog.Error = sendErr.Error()
 		} else {
 			successAlertCounter++
 			now := time.Now().Unix()
-			notifyLog.NotifyState = s.mapping.Code.State.Notify.Solved.Name
+			notifyLog.NotifyState = s.global.Code.State.Notify.Solved.Name
 			notifyLog.SentAt = &now
 		}
 
 		// **更新 TriggerLog 狀態**
 		for _, trigger := range groupTriggerLog {
-			err = s.db.UpdateTriggerLogNotifyState(trigger.UUID, notifyLog.NotifyState)
+			err = s.mysql.UpdateTriggerLogNotifyState(trigger.UUID, notifyLog.NotifyState)
 			if err != nil {
 				s.logger.Error("更新 TriggerLog 通知狀態失敗", zap.Error(err))
 			}
 		}
 
 		// **記錄 NotifyLog**
-		err = s.db.CreateNotifyLog(notifyLog)
+		err = s.mysql.CreateNotifyLog(notifyLog)
 		if err != nil {
 			s.logger.Error("寫入 NotifyLog 失敗", zap.Error(err))
 		}
@@ -598,25 +646,25 @@ func (s *Service) ProcessNotifyLog() {
 		if sendErr != nil {
 			failResolvedCounter++
 			s.logger.Error("發送恢復通知失敗", zap.Error(sendErr))
-			notifyLog.NotifyState = s.mapping.Code.State.Notify.Failed.Name
+			notifyLog.NotifyState = s.global.Code.State.Notify.Failed.Name
 			notifyLog.Error = sendErr.Error()
 		} else {
 			successResolvedCounter++
 			now := time.Now().Unix()
-			notifyLog.NotifyState = s.mapping.Code.State.Notify.Solved.Name
+			notifyLog.NotifyState = s.global.Code.State.Notify.Solved.Name
 			notifyLog.SentAt = &now
 		}
 
 		// **更新 TriggerLog 狀態**
 		for _, trigger := range groupResolvedLog {
-			err = s.db.UpdateTriggerLogResolvedNotifyState(trigger.UUID, notifyLog.NotifyState)
+			err = s.mysql.UpdateTriggerLogResolvedNotifyState(trigger.UUID, notifyLog.NotifyState)
 			if err != nil {
 				s.logger.Error("更新 TriggerLog 恢復通知狀態失敗", zap.Error(err))
 			}
 		}
 
 		// **記錄 NotifyLog**
-		err = s.db.CreateNotifyLog(notifyLog)
+		err = s.mysql.CreateNotifyLog(notifyLog)
 		if err != nil {
 			s.logger.Error("寫入 NotifyLog 失敗", zap.Error(err))
 		}
@@ -628,6 +676,8 @@ func (s *Service) ProcessNotifyLog() {
 		zap.Int("fail_alert_count", failAlertCounter),
 		zap.Int("success_resolved_count", successResolvedCounter),
 		zap.Int("fail_resolved_count", failResolvedCounter))
+
+	return nil
 }
 
 // 創建通知日誌
@@ -639,14 +689,14 @@ func (s *Service) generateNotifyLog(key string, triggers []models.TriggerLog) mo
 	contactID, _ := strconv.ParseInt(parts[0], 10, 64)
 	contactType := parts[1]
 	ruleState := parts[2]
-	contact, err := s.db.GetContactByID(contactID)
+	contact, err := s.contactService.Get(contactID)
 	if err != nil {
 		s.logger.Error("獲取聯絡人資訊失敗", zap.Error(err))
 	}
 	notifyFormat := GetFormatByType(contactType) // 🔹 自動匹配 format
 
 	// 取得對應的模板
-	alertTemplate, err := s.db.GetAlertTemplate(contact.RealmName, ruleState, notifyFormat)
+	template, err := s.mysql.GetTemplate(contact.RealmName, ruleState, notifyFormat)
 	if err != nil {
 		s.logger.Error("獲取對應的模板失敗", zap.Error(err))
 	}
@@ -664,7 +714,7 @@ func (s *Service) generateNotifyLog(key string, triggers []models.TriggerLog) mo
 	}
 
 	// 渲染通知內容
-	message, err := s.templateService.RenderMessage(alertTemplate, data)
+	message, err := s.templateService.RenderMessage(template, data)
 	if err != nil {
 		s.logger.Error("渲染通知內容失敗", zap.Error(err))
 		message = "告警通知發生錯誤，請聯繫管理員"
@@ -677,7 +727,7 @@ func (s *Service) generateNotifyLog(key string, triggers []models.TriggerLog) mo
 		ContactName: contact.Name,
 		ContactType: contactType,
 
-		Title:        alertTemplate.Title,
+		Title:        template.Title,
 		Message:      message,
 		RetryCounter: 0,
 		TriggerLogs:  make([]*models.TriggerLog, len(triggers)),
@@ -698,7 +748,7 @@ func (s *Service) sendNotifyLog(notify *models.NotifyLog) error {
 	if notify.RetryCounter >= notify.ContactMaxRetry {
 		notify.NotifyState = "failed"
 		notify.Error = fmt.Sprintf("超過最大重試次數 %d", notify.ContactMaxRetry)
-		if err := s.db.UpdateNotifyLog(*notify); err != nil {
+		if err := s.mysql.UpdateNotifyLog(*notify); err != nil {
 			s.logger.Error("更新通知狀態失敗",
 				zap.String("uuid", notify.UUID),
 				zap.Error(err))
@@ -711,14 +761,14 @@ func (s *Service) sendNotifyLog(notify *models.NotifyLog) error {
 	notify.NotifyState = "sending"
 	notify.LastRetryTime = time.Now().Unix()
 
-	if err := s.db.UpdateNotifyLog(*notify); err != nil {
+	if err := s.mysql.UpdateNotifyLog(*notify); err != nil {
 		return fmt.Errorf("更新通知日誌失敗: %w", err)
 	}
 
 	// 發送通知
 	notify.ContactConfig["title"] = notify.Title
 	notify.ContactConfig["message"] = notify.Message
-	err := s.notify.Send(common.NotifyConfig{
+	err := s.notifyService.Send(common.NotifySetting{
 		Type:   notify.ContactType,
 		Config: notify.ContactConfig,
 	})
@@ -735,7 +785,7 @@ func (s *Service) sendNotifyLog(notify *models.NotifyLog) error {
 	}
 
 	// 更新發送結果
-	if err := s.db.UpdateNotifyLog(*notify); err != nil {
+	if err := s.mysql.UpdateNotifyLog(*notify); err != nil {
 		s.logger.Error("更新通知狀態失敗",
 			zap.String("uuid", notify.UUID),
 			zap.Error(err))

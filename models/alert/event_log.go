@@ -34,8 +34,8 @@ type TriggerLog struct {
 	ResolvedTime        *int64 `json:"resolved_time,omitempty"` // 恢復時間
 
 	//* 關聯
-	Labels   JSONMap        `json:"labels" gorm:"-"`   // 標籤
-	Contacts []AlertContact `json:"contacts" gorm:"-"` // 聯絡人列表
+	Labels   JSONMap   `json:"labels" gorm:"-"`   // 標籤
+	Contacts []Contact `json:"contacts" gorm:"-"` // 聯絡人列表
 
 	CreatedAt time.Time `json:"-" form:"created_at"`
 	UpdatedAt time.Time `json:"-" form:"updated_at"`

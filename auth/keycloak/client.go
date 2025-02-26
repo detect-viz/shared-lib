@@ -5,52 +5,50 @@ import (
 	"crypto/tls"
 	"fmt"
 
-	"github.com/detect-viz/shared-lib/interfaces"
-
 	"github.com/Nerzal/gocloak/v13"
+	"github.com/detect-viz/shared-lib/models"
+	"github.com/google/wire"
 )
+
+var KeycloakSet = wire.NewSet(NewClient)
 
 // Client 實現 KeycloakClient 介面
 type Client struct {
-	gocloak      *gocloak.GoCloak
-	realm        string
-	clientID     string
-	clientSecret string
-	jwt          *gocloak.JWT
-	clientUUID   string
+	gocloak        *gocloak.GoCloak
+	keycloakConfig *models.KeycloakConfig
+	jwt            *gocloak.JWT
 }
 
 // 確保 Client 實現了 KeycloakClient 介面
-var _ interfaces.KeycloakClient = (*Client)(nil)
+var _ KeycloakClient = (*Client)(nil)
 
 // NewClient 創建新的 Keycloak 客戶端
-func NewClient(url, realm, clientID, clientSecret string, insecureSkipVerify bool) (interfaces.KeycloakClient, error) {
-	if url == "" || realm == "" || clientID == "" {
+func NewClient(keycloakConfig *models.KeycloakConfig) (KeycloakClient, error) {
+	insecureSkipVerify := true
+	if keycloakConfig.URL == "" || keycloakConfig.Realm == "" || keycloakConfig.ClientID == "" {
 		return nil, fmt.Errorf("url, realm and clientID are required")
 	}
 
-	gc := gocloak.NewClient(url)
+	gc := gocloak.NewClient(keycloakConfig.URL)
 	if insecureSkipVerify {
 		gc.RestyClient().SetTLSClientConfig(&tls.Config{InsecureSkipVerify: true})
 	}
 
 	client := &Client{
-		gocloak:      gc,
-		realm:        realm,
-		clientID:     clientID,
-		clientSecret: clientSecret,
+		gocloak:        gc,
+		keycloakConfig: keycloakConfig,
 	}
 
 	// 初始化時進行服務帳戶登入
-	jwt, err := gc.LoginClient(context.Background(), clientID, clientSecret, realm)
+	jwt, err := gc.LoginClient(context.Background(), keycloakConfig.ClientID, keycloakConfig.ClientSecret, keycloakConfig.Realm)
 	if err != nil {
 		return nil, fmt.Errorf("login client failed: %v", err)
 	}
 	client.jwt = jwt
 
 	// 獲取客戶端UUID
-	clients, err := gc.GetClients(context.Background(), jwt.AccessToken, realm, gocloak.GetClientsParams{
-		ClientID: &clientID,
+	clients, err := gc.GetClients(context.Background(), jwt.AccessToken, keycloakConfig.Realm, gocloak.GetClientsParams{
+		ClientID: &keycloakConfig.ClientID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("get client ID failed: %v", err)
@@ -58,14 +56,14 @@ func NewClient(url, realm, clientID, clientSecret string, insecureSkipVerify boo
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("client not found")
 	}
-	client.clientUUID = *clients[0].ID
+	client.keycloakConfig.ClientUUID = *clients[0].ID
 
 	return client, nil
 }
 
 // LoginClient 服務帳戶登入
 func (c *Client) LoginClient(ctx context.Context) (*gocloak.JWT, error) {
-	return c.gocloak.LoginClient(ctx, c.clientID, c.clientSecret, c.realm)
+	return c.gocloak.LoginClient(ctx, c.keycloakConfig.ClientID, c.keycloakConfig.ClientSecret, c.keycloakConfig.Realm)
 }
 
 // GetClientIDOfClient 獲取客戶端ID
@@ -75,8 +73,8 @@ func (c *Client) GetClientIDOfClient(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	clients, err := c.gocloak.GetClients(ctx, jwt.AccessToken, c.realm, gocloak.GetClientsParams{
-		ClientID: &c.clientID,
+	clients, err := c.gocloak.GetClients(ctx, jwt.AccessToken, c.keycloakConfig.Realm, gocloak.GetClientsParams{
+		ClientID: &c.keycloakConfig.ClientID,
 	})
 	if err != nil {
 		return "", err
@@ -86,4 +84,16 @@ func (c *Client) GetClientIDOfClient(ctx context.Context) (string, error) {
 	}
 
 	return *clients[0].ID, nil
+}
+
+func (c *Client) GetKeycloakConfig() models.KeycloakConfig {
+	return *c.keycloakConfig
+}
+
+func (c *Client) GetJWT() *gocloak.JWT {
+	return c.jwt
+}
+
+func (c *Client) GetGoCloak() *gocloak.GoCloak {
+	return c.gocloak
 }

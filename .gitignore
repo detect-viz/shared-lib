@@ -38,3 +38,7 @@ main
 *.conf
 bimap-ipoc
 conf/config.yaml
+202502
+grafana
+ChatGPT*
+custom.yaml

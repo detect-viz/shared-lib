@@ -26,7 +26,7 @@ func (s *Service) InitAlertRuleFromFile(configPath string) error {
 		rule.RealmName = "master"
 
 		// 保存到資料庫
-		if err := s.db.CreateOrUpdateAlertRule(rule); err != nil {
+		if err := s.mysql.CreateOrUpdateAlertRule(rule); err != nil {
 			s.logger.Error("保存告警規則失敗",
 				zap.String("name", rule.Name),
 				zap.Error(err))
@@ -56,7 +56,7 @@ func (s *Service) InitContactsFromFile(configPath string) error {
 		contact.RealmName = "master"
 
 		// 保存到資料庫
-		if err := s.db.CreateOrUpdateAlertContact(contact); err != nil {
+		if err := s.mysql.CreateOrUpdateAlertContact(contact); err != nil {
 			s.logger.Error("保存通知管道失敗",
 				zap.String("name", contact.Name),
 				zap.Error(err))

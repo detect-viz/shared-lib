@@ -6,8 +6,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// AlertContact 通知聯繫人
-type AlertContact struct {
+// Contact 通知聯繫人
+type Contact struct {
 	ID           int64  `json:"id" gorm:"primaryKey;autoIncrement"`
 	RealmName    string `json:"realm_name" gorm:"default:master"`
 	Name         string `json:"name"` // 聯繫人名稱

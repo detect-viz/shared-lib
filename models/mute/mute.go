@@ -3,41 +3,40 @@ package mute
 import (
 	"fmt"
 
-	"github.com/detect-viz/shared-lib/models/resource"
-
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/detect-viz/shared-lib/models/resource"
 	"gorm.io/gorm"
 )
 
 // 抑制規則
 type Mute struct {
-	ID             int64                     `json:"id" gorm:"primaryKey;autoIncrement"`
-	RealmName      string                    `json:"realm_name" gorm:"default:master"`
-	Name           string                    `json:"name"`                             // 抑制規則名稱
-	Years          []string                  `json:"years" gorm:"type:json"`           // 限制特定年份
-	TimeIntervals  []TimeRange               `json:"times" gorm:"type:json"`           // 允許一天內多個時間範圍
-	RepeatType     string                    `json:"repeat_type" gorm:"default:never"` // 重複類型: never, daily, weekly, monthly
-	Weekdays       []string                  `json:"weekdays" gorm:"type:json"`        // 支援 `"monday:wednesday"`
-	Months         []string                  `json:"months" gorm:"type:json"`          // `"may:august"`
-	ResourceGroups *[]resource.ResourceGroup `json:"resource_groups" gorm:"foreignKey:ResourceGroupID"`
-	CreatedAt      time.Time                 `json:"created_at" gorm:"autoCreateTime"`
-	UpdatedAt      time.Time                 `json:"updated_at" gorm:"autoUpdateTime"`
-	DeletedAt      gorm.DeletedAt            `json:"deleted_at" gorm:"index"`
-}
-
-// 時間範圍 (允許一天內多個時段)
-type TimeRange struct {
-	StartMinute string `json:"start_time"`
-	EndMinute   string `json:"end_time"`
+	ID             int64                    `json:"id" gorm:"primaryKey;autoIncrement"`
+	RealmName      string                   `json:"realm_name" gorm:"default:master"`
+	Name           string                   `json:"name"`                             // 抑制規則名稱
+	Years          []string                 `json:"years" gorm:"type:json"`           // 限制特定年份
+	TimeIntervals  []TimeRange              `json:"times" gorm:"type:json"`           // 允許一天內多個時間範圍
+	RepeatType     string                   `json:"repeat_type" gorm:"default:never"` // 重複類型: never, daily, weekly, monthly
+	Weekdays       []string                 `json:"weekdays" gorm:"type:json"`        // 支援 `"monday:wednesday"`
+	Months         []string                 `json:"months" gorm:"type:json"`          // `"may:august"`
+	ResourceGroups []resource.ResourceGroup `gorm:"many2many:mute_resource_groups"`
+	CreatedAt      time.Time                `json:"created_at" gorm:"autoCreateTime"`
+	UpdatedAt      time.Time                `json:"updated_at" gorm:"autoUpdateTime"`
+	DeletedAt      gorm.DeletedAt           `json:"deleted_at" gorm:"index"`
 }
 
 // MuteResourceGroup 告警抑制規則關聯
 type MuteResourceGroup struct {
 	MuteID          int64 `json:"mute_id" gorm:"primaryKey"`
 	ResourceGroupID int64 `json:"resource_group_id" gorm:"primaryKey"`
+}
+
+// 時間範圍 (允許一天內多個時段)
+type TimeRange struct {
+	StartMinute string `json:"start_time"`
+	EndMinute   string `json:"end_time"`
 }
 
 // IsMuted 判斷當前時間是否符合 mute 規則

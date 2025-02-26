@@ -36,9 +36,9 @@ func (rd *RuleDefinition) ToCheckRule() *CheckRule {
 	}
 }
 
-// ToAlertRule 將 RuleDefinition 轉換為 AlertRule
-func (rd *RuleDefinition) ToAlertRule() *AlertRule {
-	return &AlertRule{
+// ToAlertRule 將 RuleDefinition 轉換為 Rule
+func (rd *RuleDefinition) ToAlertRule() *Rule {
+	return &Rule{
 		Name: rd.Name,
 
 		Duration:      &rd.Duration,

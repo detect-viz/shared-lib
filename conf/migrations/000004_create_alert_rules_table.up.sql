@@ -5,7 +5,7 @@ CREATE TABLE `alert_rules` (
   `enabled` tinyint(1) NOT NULL DEFAULT '1',
   `is_joint` tinyint(1) NOT NULL DEFAULT '0',
   `resource_group_id` bigint NOT NULL,
-  `metric_rule_id` bigint NOT NULL,
+  `metric_rule_uid` varchar(100) NOT NULL,
   `info_threshold` double DEFAULT NULL COMMENT '一般告警閾值',
   `warn_threshold` double DEFAULT NULL COMMENT '警告告警閾值',
   `crit_threshold` double DEFAULT NULL COMMENT '嚴重告警閾值',
@@ -19,8 +19,6 @@ CREATE TABLE `alert_rules` (
   UNIQUE KEY `uk_rule_name` (`realm_name`,`name`),
   KEY `fk_realms_alert_rules` (`realm_name`),
   KEY `fk_resource_group_alert_rule` (`resource_group_id`),
-  KEY `fk_metric_rule_alert_rule` (`metric_rule_id`),
-  CONSTRAINT `fk_metric_rule_alert_rule` FOREIGN KEY (`metric_rule_id`) REFERENCES `metric_rules` (`id`),
   CONSTRAINT `fk_realms_alert_rules` FOREIGN KEY (`realm_name`) REFERENCES `realms` (`name`),
   CONSTRAINT `fk_resource_group_alert_rule` FOREIGN KEY (`resource_group_id`) REFERENCES `resource_groups` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

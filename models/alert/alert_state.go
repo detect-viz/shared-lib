@@ -3,7 +3,7 @@ package alert
 // AlertState 異常狀態記錄
 type AlertState struct {
 	//* 綁定關聯規則
-	RuleDetailID int64 `json:"rule_detail_id"`
+	AlertRuleDetailID int64 `json:"alert_rule_detail_id" gorm:"foreignKey:AlertRuleDetailID"`
 	//* 以下皆動態更新欄位
 	SilenceStart   *int64 `json:"silence_start"`
 	SilenceEnd     *int64 `json:"silence_end"`

@@ -7,7 +7,7 @@ import (
 	"github.com/detect-viz/shared-lib/models/label"
 	"github.com/detect-viz/shared-lib/models/mute"
 
-	"github.com/detect-viz/shared-lib/models/notify"
+	"github.com/detect-viz/shared-lib/models/notifier"
 	"github.com/detect-viz/shared-lib/models/parser"
 	"github.com/detect-viz/shared-lib/models/resource"
 	"github.com/detect-viz/shared-lib/models/scheduler"
@@ -17,15 +17,14 @@ import (
 // 統一對外暴露所有 model
 type (
 	// Alert 相關
-	AlertRule            = alert.AlertRule
+	Rule                 = alert.Rule
 	AlertRuleDetail      = alert.AlertRuleDetail
 	AlertState           = alert.AlertState
-	AlertContact         = alert.AlertContact
-	AlertTemplate        = alert.AlertTemplate
+	Contact              = alert.Contact
+	Template             = alert.Template
 	AlertMessage         = alert.AlertMessage
 	AlertMessageTemplate = alert.AlertMessageTemplate
 	CheckRule            = alert.CheckRule
-	MetricRule           = alert.MetricRule
 	TriggerLog           = alert.TriggerLog
 	NotifyLog            = alert.NotifyLog
 	NotifyTriggerLog     = alert.NotifyTriggerLog
@@ -47,11 +46,10 @@ type (
 	MuteResourceGroup = mute.MuteResourceGroup
 
 	// Notify 相關
-
-	EmailSetting  = notify.EmailSetting
-	TeamsSetting  = notify.TeamsSetting
-	LineConfig    = notify.LineConfig
-	WebhookConfig = notify.WebhookConfig
+	EmailSetting  = notifier.EmailSetting
+	TeamsSetting  = notifier.TeamsSetting
+	LineConfig    = notifier.LineConfig
+	WebhookConfig = notifier.WebhookConfig
 
 	// Label 相關
 	Label = label.Label
@@ -64,7 +62,9 @@ type (
 	SSOUser        = common.SSOUser
 	RotateSetting  = common.RotateSetting
 	RotateTask     = common.RotateTask
-	NotifyConfig   = common.NotifyConfig
+	NotifySetting  = common.NotifySetting
+	Task           = common.Task
+	TaskInfo       = common.TaskInfo
 
 	// Resource 相關
 	ResourceGroup = resource.ResourceGroup
@@ -78,20 +78,18 @@ type (
 	MetricLibrarys = parser.MetricLibrarys
 
 	// Config 相關
-	Config          = config.Config
-	ServerConfig    = config.ServerConfig
-	ParserConfig    = config.ParserConfig
-	LoggerConfig    = config.LoggerConfig
-	DatabaseConfig  = config.DatabaseConfig
-	AlertConfig     = config.AlertConfig
-	Code            = config.Code
-	MappingConfig   = config.MappingConfig
-	MetricConfig    = config.Metrics
-	TagConfig       = config.Tags
-	CodeConfig      = config.Codes
-	SchedulerConfig = config.SchedulerConfig
-	SchedulerJob    = config.SchedulerJob
-
+	Config         = config.Config
+	GlobalConfig   = config.GlobalConfig
+	ServerConfig   = config.ServerConfig
+	ParserConfig   = config.ParserConfig
+	LoggerConfig   = config.LoggerConfig
+	DatabaseConfig = config.DatabaseConfig
+	InfluxDBConfig = config.InfluxDBConfig
+	MySQLConfig    = config.MySQLConfig
+	AlertConfig    = config.AlertConfig
+	Code           = config.Code
+	MetricRule     = config.MetricRule
+	KeycloakConfig = config.KeycloakConfig
 	// Template 相關
 	TemplateData      = template.TemplateData
 	ResourceGroupInfo = template.ResourceGroupInfo

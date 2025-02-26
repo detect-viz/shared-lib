@@ -14,8 +14,8 @@ type ContactDefinition struct {
 	Details    map[string]interface{} `yaml:"details"`
 }
 
-// ToAlertContact 將 ContactDefinition 轉換為 AlertContact
-func (cd *ContactDefinition) ToAlertContact() *AlertContact {
+// ToAlertContact 將 ContactDefinition 轉換為 Contact
+func (cd *ContactDefinition) ToAlertContact() *Contact {
 	var severities []AlertContactSeverity
 	for _, s := range cd.Severities {
 		severities = append(severities, AlertContactSeverity{
@@ -28,7 +28,7 @@ func (cd *ContactDefinition) ToAlertContact() *AlertContact {
 		j[k] = v.(string)
 	}
 
-	return &AlertContact{
+	return &Contact{
 		Name:       cd.Name,
 		Type:       cd.Type,
 		Enabled:    cd.Enabled,

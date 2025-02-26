@@ -9,7 +9,7 @@ import (
 
 // GetUsers 獲取用戶列表
 func (c *Client) GetUsers(ctx context.Context, accessToken string) ([]*gocloak.User, error) {
-	users, err := c.gocloak.GetUsers(ctx, accessToken, c.realm, gocloak.GetUsersParams{})
+	users, err := c.gocloak.GetUsers(ctx, accessToken, c.keycloakConfig.Realm, gocloak.GetUsersParams{})
 	if err != nil {
 		return nil, err
 	}
@@ -22,7 +22,7 @@ func (c *Client) GetUserInfo(ctx context.Context, accessToken string) (map[strin
 		return nil, fmt.Errorf("access token is required")
 	}
 
-	userInfo, err := c.gocloak.GetUserInfo(ctx, accessToken, c.realm)
+	userInfo, err := c.gocloak.GetUserInfo(ctx, accessToken, c.keycloakConfig.Realm)
 	if err != nil {
 		return nil, fmt.Errorf("get user info failed: %v", err)
 	}
@@ -64,12 +64,12 @@ func (c *Client) GetUserInfo(ctx context.Context, accessToken string) (map[strin
 
 // GetUserRoles 獲取用戶角色
 func (c *Client) GetUserRoles(ctx context.Context, accessToken string) ([]string, error) {
-	userInfo, err := c.gocloak.GetUserInfo(ctx, accessToken, c.realm)
+	userInfo, err := c.gocloak.GetUserInfo(ctx, accessToken, c.keycloakConfig.Realm)
 	if err != nil {
 		return nil, err
 	}
 
-	roles, err := c.gocloak.GetRealmRolesByUserID(ctx, accessToken, c.realm, *userInfo.Sub)
+	roles, err := c.gocloak.GetRealmRolesByUserID(ctx, accessToken, c.keycloakConfig.Realm, *userInfo.Sub)
 	if err != nil {
 		return nil, err
 	}
@@ -90,12 +90,12 @@ func (c *Client) GetUserRoles(ctx context.Context, accessToken string) ([]string
 
 // GetUserGroups 獲取用戶群組
 func (c *Client) GetUserGroups(ctx context.Context, accessToken string) ([]string, error) {
-	userInfo, err := c.gocloak.GetUserInfo(ctx, accessToken, c.realm)
+	userInfo, err := c.gocloak.GetUserInfo(ctx, accessToken, c.keycloakConfig.Realm)
 	if err != nil {
 		return nil, err
 	}
 
-	groups, err := c.gocloak.GetUserGroups(ctx, accessToken, c.realm, *userInfo.Sub, gocloak.GetGroupsParams{})
+	groups, err := c.gocloak.GetUserGroups(ctx, accessToken, c.keycloakConfig.Realm, *userInfo.Sub, gocloak.GetGroupsParams{})
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (c *Client) GetUserGroups(ctx context.Context, accessToken string) ([]strin
 
 // CreateUser 創建用戶
 func (c *Client) CreateUser(ctx context.Context, user gocloak.User) (string, error) {
-	userID, err := c.gocloak.CreateUser(ctx, c.jwt.AccessToken, c.realm, user)
+	userID, err := c.gocloak.CreateUser(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, user)
 	if err != nil {
 		return "", fmt.Errorf("create user failed: %w", err)
 	}
@@ -124,7 +124,7 @@ func (c *Client) CreateUser(ctx context.Context, user gocloak.User) (string, err
 
 // CreateGroup 創建群組
 func (c *Client) CreateGroup(ctx context.Context, group gocloak.Group) (string, error) {
-	groupID, err := c.gocloak.CreateGroup(ctx, c.jwt.AccessToken, c.realm, group)
+	groupID, err := c.gocloak.CreateGroup(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, group)
 	if err != nil {
 		return "", fmt.Errorf("create group failed: %w", err)
 	}
@@ -133,7 +133,7 @@ func (c *Client) CreateGroup(ctx context.Context, group gocloak.Group) (string, 
 
 // CreateRole 創建角色
 func (c *Client) CreateRole(ctx context.Context, role gocloak.Role) error {
-	_, err := c.gocloak.CreateRealmRole(ctx, c.jwt.AccessToken, c.realm, role)
+	_, err := c.gocloak.CreateRealmRole(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, role)
 	if err != nil {
 		return fmt.Errorf("create role failed: %w", err)
 	}
@@ -142,12 +142,12 @@ func (c *Client) CreateRole(ctx context.Context, role gocloak.Role) error {
 
 // AddUserToRole 將用戶加入角色
 func (c *Client) AddUserToRole(ctx context.Context, userID string, roleName string) error {
-	role, err := c.gocloak.GetRealmRole(ctx, c.jwt.AccessToken, c.realm, roleName)
+	role, err := c.gocloak.GetRealmRole(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, roleName)
 	if err != nil {
 		return fmt.Errorf("get role failed: %w", err)
 	}
 
-	err = c.gocloak.AddRealmRoleToUser(ctx, c.jwt.AccessToken, c.realm, userID, []gocloak.Role{*role})
+	err = c.gocloak.AddRealmRoleToUser(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, userID, []gocloak.Role{*role})
 	if err != nil {
 		return fmt.Errorf("add user to role failed: %w", err)
 	}
@@ -156,7 +156,7 @@ func (c *Client) AddUserToRole(ctx context.Context, userID string, roleName stri
 
 // AddUserToGroup 將用戶加入群組
 func (c *Client) AddUserToGroup(ctx context.Context, userID string, groupID string) error {
-	err := c.gocloak.AddUserToGroup(ctx, c.jwt.AccessToken, c.realm, userID, groupID)
+	err := c.gocloak.AddUserToGroup(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, userID, groupID)
 	if err != nil {
 		return fmt.Errorf("add user to group failed: %w", err)
 	}
@@ -165,7 +165,7 @@ func (c *Client) AddUserToGroup(ctx context.Context, userID string, groupID stri
 
 // UpdateUser 更新用戶
 func (c *Client) UpdateUser(ctx context.Context, userID string, user gocloak.User) error {
-	err := c.gocloak.UpdateUser(ctx, c.jwt.AccessToken, c.realm, user)
+	err := c.gocloak.UpdateUser(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, user)
 	if err != nil {
 		return fmt.Errorf("update user failed: %w", err)
 	}
@@ -174,7 +174,7 @@ func (c *Client) UpdateUser(ctx context.Context, userID string, user gocloak.Use
 
 // DeleteUser 刪除用戶
 func (c *Client) DeleteUser(ctx context.Context, userID string) error {
-	err := c.gocloak.DeleteUser(ctx, c.jwt.AccessToken, c.realm, userID)
+	err := c.gocloak.DeleteUser(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, userID)
 	if err != nil {
 		return fmt.Errorf("delete user failed: %w", err)
 	}
@@ -183,7 +183,7 @@ func (c *Client) DeleteUser(ctx context.Context, userID string) error {
 
 // UpdateGroup 更新群組
 func (c *Client) UpdateGroup(ctx context.Context, groupID string, group gocloak.Group) error {
-	err := c.gocloak.UpdateGroup(ctx, c.jwt.AccessToken, c.realm, group)
+	err := c.gocloak.UpdateGroup(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, group)
 	if err != nil {
 		return fmt.Errorf("update group failed: %w", err)
 	}
@@ -192,7 +192,7 @@ func (c *Client) UpdateGroup(ctx context.Context, groupID string, group gocloak.
 
 // DeleteGroup 刪除群組
 func (c *Client) DeleteGroup(ctx context.Context, groupID string) error {
-	err := c.gocloak.DeleteGroup(ctx, c.jwt.AccessToken, c.realm, groupID)
+	err := c.gocloak.DeleteGroup(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, groupID)
 	if err != nil {
 		return fmt.Errorf("delete group failed: %w", err)
 	}
@@ -201,7 +201,7 @@ func (c *Client) DeleteGroup(ctx context.Context, groupID string) error {
 
 // UpdateRole 更新角色
 func (c *Client) UpdateRole(ctx context.Context, roleName string, role gocloak.Role) error {
-	err := c.gocloak.UpdateRealmRole(ctx, c.jwt.AccessToken, c.realm, roleName, role)
+	err := c.gocloak.UpdateRealmRole(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, roleName, role)
 	if err != nil {
 		return fmt.Errorf("update role failed: %w", err)
 	}
@@ -210,7 +210,7 @@ func (c *Client) UpdateRole(ctx context.Context, roleName string, role gocloak.R
 
 // DeleteRole 刪除角色
 func (c *Client) DeleteRole(ctx context.Context, roleName string) error {
-	err := c.gocloak.DeleteRealmRole(ctx, c.jwt.AccessToken, c.realm, roleName)
+	err := c.gocloak.DeleteRealmRole(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, roleName)
 	if err != nil {
 		return fmt.Errorf("delete role failed: %w", err)
 	}
@@ -219,12 +219,12 @@ func (c *Client) DeleteRole(ctx context.Context, roleName string) error {
 
 // RemoveUserFromRole 將用戶從角色中移除
 func (c *Client) RemoveUserFromRole(ctx context.Context, userID string, roleName string) error {
-	role, err := c.gocloak.GetRealmRole(ctx, c.jwt.AccessToken, c.realm, roleName)
+	role, err := c.gocloak.GetRealmRole(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, roleName)
 	if err != nil {
 		return fmt.Errorf("get role failed: %w", err)
 	}
 
-	err = c.gocloak.DeleteRealmRoleFromUser(ctx, c.jwt.AccessToken, c.realm, userID, []gocloak.Role{*role})
+	err = c.gocloak.DeleteRealmRoleFromUser(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, userID, []gocloak.Role{*role})
 	if err != nil {
 		return fmt.Errorf("remove user from role failed: %w", err)
 	}
@@ -233,7 +233,7 @@ func (c *Client) RemoveUserFromRole(ctx context.Context, userID string, roleName
 
 // RemoveUserFromGroup 將用戶從群組中移除
 func (c *Client) RemoveUserFromGroup(ctx context.Context, userID string, groupID string) error {
-	err := c.gocloak.DeleteUserFromGroup(ctx, c.jwt.AccessToken, c.realm, userID, groupID)
+	err := c.gocloak.DeleteUserFromGroup(ctx, c.jwt.AccessToken, c.keycloakConfig.Realm, userID, groupID)
 	if err != nil {
 		return fmt.Errorf("remove user from group failed: %w", err)
 	}

@@ -17,7 +17,7 @@ func (s *Service) applySilence(rule *models.CheckRule) {
 
 	if rule.SilenceStart != nil && rule.SilenceEnd != nil {
 		if now >= *rule.SilenceStart && now <= *rule.SilenceEnd {
-			rule.ContactState = s.mapping.Code.State.Contact.Silence.Name
+			rule.ContactState = s.global.Code.State.Contact.Silence.Name
 		}
 	}
 
@@ -29,7 +29,7 @@ func (s *Service) applyMute(rule *models.CheckRule) {
 
 	if rule.MuteStart != nil && rule.MuteEnd != nil {
 		if now >= *rule.MuteStart && now <= *rule.MuteEnd {
-			rule.ContactState = s.mapping.Code.State.Contact.Muting.Name
+			rule.ContactState = s.global.Code.State.Contact.Muting.Name
 		}
 	}
 }
@@ -80,4 +80,13 @@ func (s *Service) WriteWithLock(path string, data []byte) error {
 	defer s.UnlockFile(path)
 
 	return os.WriteFile(path, data, 0644)
+}
+
+// CheckName 檢查名稱是否存在
+func (s *Service) CheckName(name string) bool {
+	return true
+}
+
+func (s *Service) GetLogger() *zap.Logger {
+	return s.logger.GetLogger()
 }

@@ -1,4 +1,4 @@
-CREATE TABLE `alert_contacts` (
+CREATE TABLE `contacts` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `realm_name` varchar(50) DEFAULT 'master',
   `name` varchar(255) NOT NULL,

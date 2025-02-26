@@ -1,1 +1,1 @@
-DROP TABLE IF EXISTS `alert_contacts`; 
+DROP TABLE IF EXISTS `contacts`; 

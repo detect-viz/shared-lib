@@ -1,5 +1,5 @@
 CREATE TABLE `alert_states` (
-  `rule_detail_id` bigint NOT NULL,
+  `alert_rule_detail_id` bigint NOT NULL,
   `silence_start` bigint DEFAULT NULL,
   `silence_end` bigint DEFAULT NULL,
   `mute_start` bigint DEFAULT NULL,
@@ -16,7 +16,8 @@ CREATE TABLE `alert_states` (
   `amplitude` decimal(10,2) DEFAULT '0.00',
   `created_at` bigint DEFAULT NULL,
   `updated_at` bigint DEFAULT NULL,
-  UNIQUE KEY `idx_alert_state` (`rule_detail_id`),
+  FOREIGN KEY (`alert_rule_detail_id`) REFERENCES `alert_rule_details` (`id`),
+  UNIQUE KEY `idx_alert_state` (`alert_rule_detail_id`),
   KEY `idx_start_time` (`silence_start`),
   KEY `idx_end_time` (`silence_end`),
   KEY `idx_mute_start` (`mute_start`),

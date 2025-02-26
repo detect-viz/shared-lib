@@ -2,8 +2,8 @@ package alert
 
 import "time"
 
-// AlertTemplate 通知模板
-type AlertTemplate struct {
+// Template 通知模板
+type Template struct {
 	RealmName string    `json:"realm_name" gorm:"default:master"`
 	ID        int64     `json:"id" gorm:"primaryKey;autoIncrement"`
 	IsDefault bool      `json:"is_default" gorm:"default:false;index"`

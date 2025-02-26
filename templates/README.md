@@ -127,27 +127,10 @@ message, err := templateSvc.RenderMessage(tmpl, data)
 **通知模板管理方式**
 -----------------------
 
-1.  **在 `config.yaml` 設定 (`templates`路徑)**
-    *   **手動管理** `default-templates.yaml`，在 `/etc/grafana/provisioning/notifiers/` 路徑。
-    *   透過 **`provisioning`** 自動載入。
-2.  **在資料庫 (`DB`) 管理**
-    *   透過 API 或 UI 設定 `Contact Point`，可自訂 `Message` 內容。
+
+1. **手動設定通知模板**，存放在 `default-templates.yaml`，Alert Service 啟動時會自動載入。
 
 
-1. **手動設定通知模板**，存放在 `default-templates.yaml`，Grafana 啟動時會自動載入。
-
-### **📌 `default-templates.yaml` (YAML 格式)**
-
-```yaml
-templates:
-  - name: "slack-default"
-    template: |
-      {{ define "slack.default.message" }}
-      🚨 Alert: {{ .alertName }}  
-      🔹 *Status:* {{ .status }}  
-      🔹 *Value:* {{ .values }}
-      {{ end }}
-```
 
 📌 這個 YAML 存放在 `/etc/${APP_NAME}/provisioning/notifiers/default-templates.yaml`。  
 📌 在 **重啟時** 讀取這些模板。
