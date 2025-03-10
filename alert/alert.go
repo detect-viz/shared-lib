@@ -1,241 +1,484 @@
 package alert
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
-	"github.com/detect-viz/shared-lib/auth/keycloak"
 	"github.com/detect-viz/shared-lib/contacts"
 	"github.com/detect-viz/shared-lib/infra/logger"
 	"github.com/detect-viz/shared-lib/infra/scheduler"
-	"github.com/detect-viz/shared-lib/labels"
 	"github.com/detect-viz/shared-lib/models"
 	"github.com/detect-viz/shared-lib/models/common"
-	"github.com/detect-viz/shared-lib/mutes"
 	"github.com/detect-viz/shared-lib/notifier"
 	"github.com/detect-viz/shared-lib/rules"
 	"github.com/detect-viz/shared-lib/storage/mysql"
 	"github.com/detect-viz/shared-lib/templates"
 
-	"time"
-
-	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
-//* ======================== 1.init.go ========================
+// AlertService 子函數說明：
+// CheckPayload - 初步驗證 AlertPayload
+// AutoApplyTarget - 自動匹配監控對象
+// AutoApplyRule - 自動匹配告警規則
+// GetActiveRules - 查詢符合條件的規則
+// CheckSingle - 執行異常檢測 (CheckAbsolute / CheckAmplitude)
+// updateAlertState - 更新 rule_states
+// processTriggerLog - 建立 TriggeredLog 記錄
 
-// Service 告警服務
 type Service struct {
 	ruleService      rules.Service
-	muteService      mutes.Service
 	contactService   contacts.Service
 	notifyService    notifier.Service
-	schedulerService *scheduler.Service
+	schedulerService scheduler.Service
 	templateService  templates.Service
-	labelService     labels.Service
 	config           models.AlertConfig
 	global           models.GlobalConfig
-	globalRules      map[string]map[string]map[string][]models.CheckRule
+	globalRules      map[string]map[string]map[string][]models.Rule
+	metricRules      map[string][]models.MetricRule
 	logger           logger.Logger
 	mysql            *mysql.Client
-	keycloak         *keycloak.Client
+	// keycloak         *keycloak.Client
+	// muteService      mutes.Service
+	// labelService     labels.Service
 }
 
-// ✅ 直接返回已注入的 `RuleService`
 func (s *Service) GetRuleService() rules.Service {
 	return s.ruleService
 }
 
-// ✅ 直接返回已注入的 `MuteService`
-func (s *Service) GetMuteService() mutes.Service {
-	return s.muteService
-}
-
-// ✅ 直接返回已注入的 `NotifyService`
 func (s *Service) GetNotifyService() notifier.Service {
 	return s.notifyService
 }
 
-// ✅ 直接返回已注入的 `ContactService`
 func (s *Service) GetContactService() contacts.Service {
 	return s.contactService
 }
 
-// ✅ 直接返回已注入的 `LabelService`
-func (s *Service) GetLabelService() labels.Service {
-	return s.labelService
+func (s *Service) GetSchedulerService() scheduler.Service {
+	return s.schedulerService
 }
 
-// NewService 創建告警服務
+func (s *Service) GetTemplateService() templates.Service {
+	return s.templateService
+}
+
+func (s *Service) GetMysqlClient() *mysql.Client {
+	return s.mysql
+}
+
+// 創建告警服務
 func NewService(
 	config models.AlertConfig,
 	global models.GlobalConfig,
 	mysqlClient *mysql.Client,
 	logSvc logger.Logger,
 	rule rules.Service,
-	mute mutes.Service,
-	keycloak *keycloak.Client,
 	notify notifier.Service,
 	contact contacts.Service,
-	scheduler *scheduler.Service,
+	scheduler scheduler.Service,
 	template templates.Service,
-	label labels.Service,
 ) *Service {
-	logger := logSvc.With(zap.String("module", "alert"))
 	alertService := &Service{
-		config:           config,
-		global:           global,
-		logger:           logger,
-		mysql:            mysqlClient,
 		ruleService:      rule,
-		muteService:      mute,
-		keycloak:         keycloak,
-		notifyService:    notify,
 		contactService:   contact,
+		notifyService:    notify,
 		schedulerService: scheduler,
 		templateService:  template,
-		labelService:     label,
+		config:           config,
+		global:           global,
+		logger:           logSvc,
+		mysql:            mysqlClient,
 	}
 
-	alertService.mysql.LoadAlertMigrate(alertService.config.MigratePath)
-
-	// 註冊批次通知任務
-	alertService.registerNotifyTask()
-
-	allRules := alertService.getGlobalRules()
-	if len(allRules) == 0 {
-		alertService.logger.Warn("獲取告警規則為空")
-		return nil
+	// 註冊通知任務
+	if err := alertService.registerNotifyTask(); err != nil {
+		logSvc.Error("註冊通知任務失敗", zap.Error(err))
 	}
-	alertService.logger.Info("獲取告警規則成功")
-	if alertService.logger.IsDebugMode() {
-		globalRules, _ := json.MarshalIndent(allRules, "", "\t")
-		os.Stdout.Write(globalRules)
-	}
-	alertService.globalRules = allRules
+
+	// 載入所有規則
+	alertService.globalRules = alertService.getGlobalRules()
+
+	// 啟動定期重新載入任務
+	alertService.scheduleRulesReload()
+
+	// 載入 metricRules
+	alertService.metricRules = alertService.getMetricRules()
 
 	return alertService
 }
 
-// 獲取所有告警規則
-func (s *Service) getGlobalRules() map[string]map[string]map[string][]models.CheckRule {
-	//* 0. 初始化 [realm][resource][metric:partition]{rule}
-	allCheckRules := make(map[string]map[string]map[string][]models.CheckRule)
-
-	//* 1. 獲取規則
-	alertRules, err := s.mysql.GetRules()
-	if err != nil {
-		s.logger.Error("獲取告警規則失敗", zap.Error(err))
-		return nil
+// * 獲取所有 MetricRule 用 UID 作為 key
+func (s *Service) getMetricRules() map[string][]models.MetricRule {
+	metricRules := make(map[string][]models.MetricRule)
+	for _, rule := range s.global.MetricRules {
+		metricRules[rule.Category] = append(metricRules[rule.Category], rule)
 	}
+	return metricRules
+}
 
-	//* 2. 轉換規則
-	for realm, alert_rules := range alertRules {
-		//* 第一層 - realm
-		allCheckRules[realm] = make(map[string]map[string][]models.CheckRule)
+// AutoApply 自動匹配監控對象和告警規則，並返回匹配的規則列表
+func (s *Service) AutoApply(payload models.AlertPayload) ([]models.Rule, error) {
+	s.logger.Debug("自動匹配監控對象&告警規則",
+		zap.String("realm", payload.Metadata.RealmName),
+		zap.String("resource", payload.Metadata.ResourceName),
+		zap.String("datasource", payload.Metadata.DataSource))
 
-		for _, alert_rule := range alert_rules {
-			resourceGroupName, err := s.mysql.GetResourceGroupName(alert_rule.ResourceGroupID)
+	// 用於存儲匹配的規則
+	var matchedRules []models.Rule
+
+	// 檢查每個 metric 的 partition
+	for metricKey := range payload.Data.Metrics {
+		// 解析 metricKey 獲取 partition
+		parts := strings.Split(metricKey, ":")
+		if len(parts) < 2 {
+			s.logger.Warn("metric key 格式不正確，跳過",
+				zap.String("metric_key", metricKey))
+			continue
+		}
+
+		metricName := parts[0]
+		partitionName := strings.Join(parts[1:], ":")
+
+		// 檢查 target 是否存在
+		exists, err := s.mysql.CheckTargetExists(
+			payload.Metadata.RealmName,
+			payload.Metadata.DataSource,
+			payload.Metadata.ResourceName,
+			partitionName,
+		)
+		if err != nil {
+			s.logger.Error("檢查 target 失敗",
+				zap.Error(err),
+				zap.String("realm", payload.Metadata.RealmName),
+				zap.String("resource", payload.Metadata.ResourceName),
+				zap.String("partition", partitionName))
+			continue
+		}
+
+		if exists {
+			s.logger.Debug("target 已存在，獲取相關規則",
+				zap.String("realm", payload.Metadata.RealmName),
+				zap.String("resource", payload.Metadata.ResourceName),
+				zap.String("partition", partitionName))
+
+			// 獲取與此 target 相關的規則
+			targetRules, err := s.mysql.GetRulesByTarget(
+				payload.Metadata.RealmName,
+				payload.Metadata.ResourceName,
+				partitionName)
 			if err != nil {
-				s.logger.Error("獲取資源群組名稱失敗", zap.Error(err))
+				s.logger.Error("獲取 target 相關規則失敗",
+					zap.Error(err),
+					zap.String("realm", payload.Metadata.RealmName),
+					zap.String("resource", payload.Metadata.ResourceName),
+					zap.String("partition", partitionName))
+			} else if len(targetRules) > 0 {
+				// 將找到的規則添加到匹配規則列表中
+				for _, rule := range targetRules {
+					matchedRules = append(matchedRules, rule)
+				}
+			}
+			continue
+		}
+
+		// 如果 target 不存在，則創建
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+
+			category := s.getMetricCategory(payload.Metadata.DataSource, metricName)
+
+			var collection_interval int
+			if len(payload.Data.Metrics[metricKey]) > 2 {
+				collection_interval = int(payload.Data.Metrics[metricKey][0].Timestamp - payload.Data.Metrics[metricKey][1].Timestamp)
+			}
+
+			var reporting_interval int
+			if len(payload.Data.Metrics[metricKey]) > 2 {
+				reporting_interval = int(payload.Data.Metrics[metricKey][0].Timestamp - payload.Data.Metrics[metricKey][len(payload.Data.Metrics[metricKey])-1].Timestamp)
+			}
+
+			s.logger.Info("自動創建 target",
+				zap.String("realm", payload.Metadata.RealmName),
+				zap.String("resource", payload.Metadata.ResourceName),
+				zap.String("partition", partitionName),
+				zap.String("metric", metricName),
+				zap.String("datasource", payload.Metadata.DataSource))
+
+			// 創建新的 target
+			newTarget := models.Target{
+				RealmName:          payload.Metadata.RealmName,
+				ResourceName:       payload.Metadata.ResourceName,
+				PartitionName:      partitionName,
+				DatasourceName:     payload.Metadata.DataSource,
+				CollectionInterval: collection_interval,
+				ReportingInterval:  reporting_interval,
+			}
+			systemStr := "system"
+			newTarget.Category = category
+			newTarget.CreatedBy = &systemStr
+			newTarget.Status = "active"
+			newTarget.IsHidden = false
+			// 保存到數據庫
+			newTargetResult, err := s.mysql.CreateTarget(&newTarget)
+			if err != nil {
+				s.logger.Error("創建 target 失敗",
+					zap.Error(err),
+					zap.Any("target", newTarget))
 				continue
 			}
 
-			for _, detail := range alert_rule.AlertRuleDetails {
-				//* 第二層 - resource
-				if _, ok := allCheckRules[realm][detail.ResourceName]; !ok {
-					allCheckRules[realm][detail.ResourceName] = make(map[string][]models.CheckRule)
-				}
+			s.logger.Info("成功創建 target",
+				zap.String("id", string(newTargetResult.ID)),
+				zap.String("realm", payload.Metadata.RealmName),
+				zap.String("resource", payload.Metadata.ResourceName),
+				zap.String("partition", partitionName))
 
-				var muteStart, muteEnd int64
-				if s.muteService.IsRuleMuted(alert_rule.ResourceGroupID, time.Now()) {
-					muteStart, muteEnd = s.muteService.GetMutePeriod(alert_rule.ResourceGroupID, time.Now())
-					s.logger.Debug("抑制規則啟用",
-						zap.Int64("mute_start", muteStart),
-						zap.Int64("mute_end", muteEnd))
-				}
+			// 自動匹配告警規則
+			var createdRules []models.Rule
+			autoApplyRules := s.matchAutoApplyRule(payload.Metadata.RealmName, payload.Metadata.DataSource, metricName)
+			if autoApplyRules != nil {
 
-				labels, err := s.mysql.GetRuleLabels(alert_rule.ID)
+				for _, rule := range *autoApplyRules {
+					var newRule models.Rule
+					newRule.RealmName = payload.Metadata.RealmName
+					newRule.MetricRuleUID = rule.MetricRuleUID
+					newRule.TargetID = newTargetResult.ID
+					newRule.CreateType = "auto"
+					newRule.CreatedBy = &systemStr
+					newRule.Enabled = true
+					newRule.AutoApply = false
+					newRule.InfoThreshold = rule.InfoThreshold
+					newRule.WarnThreshold = rule.WarnThreshold
+					newRule.CritThreshold = rule.CritThreshold
+					newRule.Duration = rule.Duration
+					newRule.Times = rule.Times
+					newRule.SilencePeriod = rule.SilencePeriod
+					createdRules = append(createdRules, newRule)
+				}
+			}
+
+			if len(createdRules) > 0 {
+				err := s.mysql.CreateRules(createdRules)
 				if err != nil {
-					s.logger.Error("獲取自定義標籤失敗", zap.Error(err))
-					continue
-				}
-
-				// Convert labels to JSONMap
-				labelsMap := make(models.JSONMap)
-				for key, value := range labels {
-					labelsMap[key] = value
-				}
-				contacts, err := s.contactService.GetContactsByRuleID(alert_rule.ID)
-				if err != nil {
-					s.logger.Error("獲取通知對象失敗", zap.Error(err))
-					continue
-				}
-
-				alertState, err := s.mysql.GetAlertState(detail.ID)
-				if err != nil {
-					s.logger.Error("獲取告警狀態失敗", zap.Error(err))
-					continue
-				}
-				//* 靜態資訊轉換
-				check_rule := models.CheckRule{
-					RealmName:         realm,                      // 告警規則所在的 realm
-					ResourceGroupID:   alert_rule.ResourceGroupID, // 資源群組 ID
-					ResourceGroupName: resourceGroupName,          // 資源群組
-					ResourceName:      detail.ResourceName,        // 監控的主機/設備
-					PartitionName:     detail.PartitionName,       // 分區名稱 (可選)
-					MetricName:        alert_rule.MetricRule.MetricName,
-					CheckType:         alert_rule.MetricRule.CheckType,
-					Operator:          alert_rule.MetricRule.Operator,
-					InfoThreshold:     alert_rule.InfoThreshold,
-					WarnThreshold:     alert_rule.WarnThreshold,
-					CritThreshold:     alert_rule.CritThreshold,
-					DisplayUnit:       alert_rule.MetricRule.DisplayUnit,
-					RawUnit:           alert_rule.MetricRule.RawUnit,
-					Scale:             alert_rule.MetricRule.Scale,
-
-					Duration:     *alert_rule.Duration,    // 異常持續時間
-					RuleID:       alert_rule.ID,           // 關聯的告警規則 ID
-					RuleName:     alert_rule.Name,         // 規則名稱
-					SilenceStart: alertState.SilenceStart, // 靜音開始時間
-					SilenceEnd:   alertState.SilenceEnd,   // 靜音結束時間
-					MuteStart:    &muteStart,              // 抑制開始時間(最早)
-					MuteEnd:      &muteEnd,                // 抑制結束時間(最晚)
-					Labels:       labelsMap,               // 其他標籤
-					Contacts:     contacts,                // 通知對象
-				}
-
-				//* 第三層 - metric
-				var key string
-				if detail.PartitionName != nil && *detail.PartitionName != "" && *detail.PartitionName != "total" {
-					check_rule.Tags = make(map[string]string)
-					check_rule.Tags[s.global.Tag.Base.Host] = detail.ResourceName
-					key = alert_rule.MetricRule.MetricName + ":" + *detail.PartitionName
-					tagkeys := strings.Split(alert_rule.MetricRule.Tags, ",")
-					tagValues := strings.Split(*detail.PartitionName, ",")
-					if len(tagkeys) != len(tagValues) {
-						s.logger.Error("標籤數量不匹配", zap.String("metric", alert_rule.MetricRule.MetricName), zap.String("partition", *detail.PartitionName))
-						continue
-					}
-					for i, tagKey := range tagkeys {
-						check_rule.Tags[tagKey] = tagValues[i]
-					}
+					s.logger.Error("創建規則失敗",
+						zap.Error(err),
+						zap.Any("rules", createdRules))
 				} else {
-					key = alert_rule.MetricRule.MetricName
+					// 創建成功後，獲取新創建的規則
+					newRules, err := s.mysql.GetRulesByTarget(
+						payload.Metadata.RealmName,
+						payload.Metadata.ResourceName,
+						partitionName)
+					if err != nil {
+						s.logger.Error("獲取新創建的規則失敗",
+							zap.Error(err),
+							zap.String("realm", payload.Metadata.RealmName),
+							zap.String("resource", payload.Metadata.ResourceName),
+							zap.String("partition", partitionName))
+					} else {
+						matchedRules = append(matchedRules, newRules...)
+					}
 				}
-
-				allCheckRules[realm][detail.ResourceName][key] = append(
-					allCheckRules[realm][detail.ResourceName][key],
-					check_rule,
-				)
 			}
 		}
 	}
-	return allCheckRules
+
+	// 如果沒有找到任何匹配的規則，則從資料庫獲取所有活動的規則
+	if len(matchedRules) == 0 {
+		rules, err := s.mysql.GetActiveRules(payload.Metadata.RealmName, payload.Metadata.ResourceName)
+		if err != nil {
+			s.logger.Error("獲取活動規則失敗",
+				zap.Error(err),
+				zap.String("realm", payload.Metadata.RealmName),
+				zap.String("resource", payload.Metadata.ResourceName))
+			return nil, err
+		}
+		matchedRules = rules
+	}
+
+	return matchedRules, nil
+}
+
+// 獲取所有告警規則，並組織成高效的查詢結構
+func (s *Service) getGlobalRules() map[string]map[string]map[string][]models.Rule {
+	//* 0. 初始化 [realm][resource][metric:partition]{rule}
+	allRules := make(map[string]map[string]map[string][]models.Rule)
+
+	//* 1. 獲取所有活動的規則
+	// 從所有 realm 和 resource 獲取規則
+	activeRules, err := s.mysql.GetAllActiveRules()
+	if err != nil {
+		s.logger.Error("獲取所有告警規則失敗", zap.Error(err))
+		return nil
+	}
+
+	//* 2. 轉換規則為高效的查詢結構
+	for _, rule := range activeRules {
+		realmName := rule.RealmName
+		resourceName := rule.Target.ResourceName
+		partitionName := rule.Target.PartitionName
+
+		// 初始化 map 結構
+		if _, ok := allRules[realmName]; !ok {
+			allRules[realmName] = make(map[string]map[string][]models.Rule)
+		}
+		if _, ok := allRules[realmName][resourceName]; !ok {
+			allRules[realmName][resourceName] = make(map[string][]models.Rule)
+		}
+
+		// 使用 metricRuleUID:partitionName 作為 key
+		key := rule.MetricRuleUID
+		if partitionName != "" {
+			key = key + ":" + partitionName
+		}
+
+		allRules[realmName][resourceName][key] = append(allRules[realmName][resourceName][key], rule)
+	}
+
+	s.logger.Info("已載入所有告警規則",
+		zap.Int("realm_count", len(allRules)),
+		zap.Int("rule_count", len(activeRules)))
+
+	return allRules
+}
+
+// 添加一個互斥鎖來保護 globalRules
+var globalRulesMutex sync.RWMutex
+
+// 從 globalRules 中快速匹配規則
+func (s *Service) matchRulesFromGlobalRules(payload models.AlertPayload) []models.Rule {
+	globalRulesMutex.RLock()
+	defer globalRulesMutex.RUnlock()
+
+	var matchedRules []models.Rule
+	realmName := payload.Metadata.RealmName
+	resourceName := payload.Metadata.ResourceName
+
+	// 1. 檢查是否有匹配的 realm 和 resource
+	resourceRules, ok := s.globalRules[realmName]
+	if !ok {
+		return matchedRules
+	}
+
+	metricRules, ok := resourceRules[resourceName]
+	if !ok {
+		return matchedRules
+	}
+
+	// 2. 為每個 payload 中的 metric 找到匹配的規則
+	metricKeyMap := make(map[string]bool)
+	for metricKey := range payload.Data.Metrics {
+		metricKeyMap[metricKey] = true
+	}
+
+	// 3. 遍歷所有規則，檢查是否有匹配的 metric
+	for ruleKey, rules := range metricRules {
+		// 解析 ruleKey 獲取 metricRuleUID 和 partitionName
+		parts := strings.Split(ruleKey, ":")
+		metricRuleUID := parts[0]
+
+		// 獲取對應的 MetricRule
+		var metricRule models.MetricRule
+		for _, ruleSet := range s.metricRules {
+			for _, r := range ruleSet {
+				if r.UID == metricRuleUID {
+					metricRule = r
+					break
+				}
+			}
+			if metricRule.UID != "" {
+				break
+			}
+		}
+
+		if metricRule.UID == "" {
+			continue
+		}
+
+		// 構建完整的 metricKey
+		metricKey := metricRule.MetricRawName
+		if len(parts) > 1 {
+			partitionName := strings.Join(parts[1:], ":")
+			metricKey = metricKey + ":" + partitionName
+		}
+
+		// 檢查 payload 中是否有對應的 metric 數據
+		if metricKeyMap[metricKey] {
+			matchedRules = append(matchedRules, rules...)
+		}
+	}
+
+	return matchedRules
+}
+
+// 定期重新載入所有規則
+func (s *Service) scheduleRulesReload() {
+	// 每天凌晨 3 點重新載入所有規則
+	go func() {
+		for {
+			now := time.Now()
+			next := time.Date(now.Year(), now.Month(), now.Day()+1, 3, 0, 0, 0, now.Location())
+			time.Sleep(next.Sub(now))
+
+			globalRulesMutex.Lock()
+			s.globalRules = s.getGlobalRules()
+			globalRulesMutex.Unlock()
+
+			s.logger.Info("已重新載入所有規則")
+		}
+	}()
+}
+
+// 在 CRUD 操作後更新 globalRules
+func (s *Service) updateGlobalRules(rule models.Rule, operation string) {
+	globalRulesMutex.Lock()
+	defer globalRulesMutex.Unlock()
+
+	realmName := rule.RealmName
+	resourceName := rule.Target.ResourceName
+	partitionName := rule.Target.PartitionName
+
+	// 初始化 map 結構（如果需要）
+	if _, ok := s.globalRules[realmName]; !ok {
+		s.globalRules[realmName] = make(map[string]map[string][]models.Rule)
+	}
+	if _, ok := s.globalRules[realmName][resourceName]; !ok {
+		s.globalRules[realmName][resourceName] = make(map[string][]models.Rule)
+	}
+
+	// 使用 metricRuleUID:partitionName 作為 key
+	key := rule.MetricRuleUID
+	if partitionName != "" {
+		key = key + ":" + partitionName
+	}
+
+	switch operation {
+	case "create":
+		s.globalRules[realmName][resourceName][key] = append(s.globalRules[realmName][resourceName][key], rule)
+	case "update":
+		// 找到並更新規則
+		for i, r := range s.globalRules[realmName][resourceName][key] {
+			if bytes.Equal(r.ID, rule.ID) {
+				s.globalRules[realmName][resourceName][key][i] = rule
+				break
+			}
+		}
+	case "delete":
+		// 找到並刪除規則
+		for i, r := range s.globalRules[realmName][resourceName][key] {
+			if bytes.Equal(r.ID, rule.ID) {
+				s.globalRules[realmName][resourceName][key] = append(s.globalRules[realmName][resourceName][key][:i], s.globalRules[realmName][resourceName][key][i+1:]...)
+				break
+			}
+		}
+	}
 }
 
 // 註冊批次通知任務
@@ -263,8 +506,6 @@ func (s *Service) registerNotifyTask() error {
 			return err
 		}
 
-		s.logger.Info("已註冊批次通知任務",
-			zap.Int("period", s.config.NotifyPeriod))
 	}
 
 	s.logger.Info("通知服務初始化完成")
@@ -272,218 +513,154 @@ func (s *Service) registerNotifyTask() error {
 	return nil
 }
 
-// * ======================== 2.service.go 檢查主程式 ========================
-func (s *Service) Process(file models.FileInfo, metrics map[string][]map[string]interface{}) error {
-	matchRuleCounter := 0
-	triggeredRuleCounter := 0
-	//* 檢查 resource 是否有設定告警規則
-	resourceRules, ok := s.globalRules[file.Realm][file.Host]
-	if !ok {
-		s.logger.Debug("找不到主機對應的告警規則",
-			zap.String("Realm", file.Realm),
-			zap.String("Host", file.Host))
-		return nil
-	}
-
-	//* metric 跟 rule 匹配啟動 check 函式
-	for metricKey, metricData := range metrics {
-		metricRules, ok := resourceRules[metricKey]
-		if !ok {
-			s.logger.Debug("Metric 找不到對應的 rule ", zap.String("key", metricKey))
-			continue
-		}
-		matchRuleCounter += len(metricRules)
-		for _, metricRule := range metricRules {
-
-			//* 使用 Check 方法處理告警邏輯
-			rule := metricRule
-			rule.Timestamp = time.Now().Unix()
-
-			//* 確認 Contact State
-			s.applySilence(&rule)
-			s.applyMute(&rule)
-
-			state, err := s.mysql.GetAlertState(rule.RuleDetailID)
-			if err != nil {
-				s.logger.Error("獲取告警狀態失敗", zap.Error(err))
-				continue
-			}
-			exceeded, value, timestamp := s.CheckSingle(&rule, file, metricData, state)
-			if !exceeded {
-				continue
-			}
-
-			// 記錄最新數據
-			state.LastTriggerValue = value
-			state.LastTriggerTime = timestamp
-
-			// 計算 stack_duration
-			stackDuration := timestamp - state.LastTriggerTime
-
-			// **異常觸發**
-			if stackDuration >= int64(rule.Duration) {
-				if state.RuleState != "alerting" {
-					state.RuleState = "alerting"
-					s.writeTriggerLog(rule, state) // 只寫入一次
-				}
-			} else {
-				// **異常恢復**
-				if state.RuleState == "alerting" {
-					state.RuleState = "resolved"
-					s.writeResolvedLog(rule, state) // 記錄恢復狀態
-				} else {
-					state.RuleState = "normal"
-				}
-				state.FirstTriggerTime = 0 // 清除 FirstTriggerTime
-				stackDuration = 0          // 重置 stack_duration
-			}
-
-			// 更新 AlertState
-			err = s.mysql.SaveAlertState(state)
-			if err != nil {
-				s.logger.Error("更新 AlertState 失敗", zap.Error(err))
-				continue
-			}
-			triggeredRuleCounter++
-
-		}
-
-	}
-
-	s.logger.Debug(fmt.Sprintf("檔案 %v 告警規則檢查總共 %v 條，觸發告警規則 %v 條", file.FileName, matchRuleCounter, triggeredRuleCounter))
-	return nil
-}
-
-// 記錄 TriggerLog 並確保異常只寫入一次
-func (s *Service) writeTriggerLog(rule models.CheckRule, state models.AlertState) error {
-
-	// 檢查 CurrentThreshold 是否為 nil
-	var threshold float64
-	if rule.Threshold != nil {
-		threshold = *rule.Threshold
-	}
-
-	// **查詢是否已有異常記錄**
-	existingTrigger, err := s.mysql.GetActiveTriggerLog(rule.RuleID, rule.ResourceName, rule.MetricName)
-	if err != nil {
-		s.logger.Error("查詢 TriggerLog 失敗",
-			zap.Int64("rule_id", rule.RuleID),
-			zap.String("resource", rule.ResourceName),
-			zap.String("metric", rule.MetricName),
-			zap.Error(err))
+// * ======================== 2.service.go 檢查主程式 (主入口) ========================
+func (s *Service) ProcessAlert(payload models.AlertPayload) error {
+	// 1. 檢查 payload 格式
+	if err := s.CheckPayload(payload); err != nil {
+		s.logger.Error("檢查 payload 失敗", zap.Error(err))
 		return err
 	}
 
-	// **如果異常持續發生，則更新 TriggerLog**
-	if existingTrigger != nil {
-		existingTrigger.Timestamp = time.Now().Unix()
-		existingTrigger.TriggerValue = state.LastTriggerValue
-		existingTrigger.Severity = rule.Severity
-		return s.mysql.UpdateTriggerLog(*existingTrigger)
-	}
+	// 2. 從 globalRules 中快速匹配規則
+	rules := s.matchRulesFromGlobalRules(payload)
 
-	// **如果沒有異常記錄，則寫入新的 TriggerLog**
-	trigger := models.TriggerLog{
-		UUID:             uuid.New().String(),
-		RuleID:           rule.RuleID,
-		ResourceName:     rule.ResourceName,
-		PartitionName:    rule.PartitionName,
-		MetricName:       rule.MetricName,
-		TriggerValue:     state.LastTriggerValue,
-		Threshold:        threshold,
-		Timestamp:        time.Now().Unix(),
-		FirstTriggerTime: state.FirstTriggerTime,
-		Severity:         rule.Severity,
-		ContactState:     rule.ContactState,
-		SilenceStart:     rule.SilenceStart,
-		SilenceEnd:       rule.SilenceEnd,
-		MuteStart:        rule.MuteStart,
-		MuteEnd:          rule.MuteEnd,
-		Labels:           rule.Labels,
-		Contacts:         rule.Contacts,
-	}
+	// 如果沒有匹配到規則，則嘗試 AutoApply
+	if len(rules) == 0 {
+		s.logger.Debug("從 globalRules 中未匹配到規則，嘗試 AutoApply",
+			zap.String("realm", payload.Metadata.RealmName),
+			zap.String("resource", payload.Metadata.ResourceName))
 
-	return s.mysql.CreateTriggerLog(trigger)
-
-}
-
-// * ======================== 4.absolute.go 絕對值 ========================
-func (s *Service) CheckAbsolute(rule *models.CheckRule, file models.FileInfo, metrics []map[string]interface{}, state models.AlertState) (bool, float64, int64) {
-	if len(metrics) == 0 {
-		return false, 0, 0
-	}
-
-	now := time.Now().Unix()
-	var lastValue float64
-	var allExceeded = true
-
-	for _, data := range metrics {
-		floatValue, err := s.parseMetricValue(data["value"])
+		var err error
+		rules, err = s.AutoApply(payload)
 		if err != nil {
+			s.logger.Error("自動匹配監控對象和規則失敗", zap.Error(err))
+			// 如果出錯，仍然嘗試從資料庫獲取規則
+			rules, err = s.mysql.GetActiveRules(payload.Metadata.RealmName, payload.Metadata.ResourceName)
+			if err != nil {
+				s.logger.Error("獲取告警規則失敗", zap.Error(err))
+				return err
+			}
+		}
+
+		// 如果通過 AutoApply 創建了新規則，更新 globalRules
+		if len(rules) > 0 {
+			s.logger.Info("通過 AutoApply 創建了新規則，更新 globalRules",
+				zap.Int("rule_count", len(rules)))
+
+			// 重新載入 globalRules
+			globalRulesMutex.Lock()
+			s.globalRules = s.getGlobalRules()
+			globalRulesMutex.Unlock()
+		}
+	}
+
+	s.logger.Info("開始檢查告警規則",
+		zap.String("realm", payload.Metadata.RealmName),
+		zap.String("resource", payload.Metadata.ResourceName),
+		zap.Int("rule_count", len(rules)))
+
+	// 計數器
+	matchRuleCounter := 0
+	triggeredRuleCounter := 0
+
+	// 3. 對每個規則進行檢查
+	for _, rule := range rules {
+		// 獲取對應的 MetricRule
+		var metricRule models.MetricRule
+		for _, rules := range s.metricRules {
+			for _, r := range rules {
+				if r.UID == rule.MetricRuleUID {
+					metricRule = r
+					break
+				}
+			}
+			if metricRule.UID != "" {
+				break
+			}
+		}
+
+		if metricRule.UID == "" {
+			s.logger.Error("找不到對應的 metric rule",
+				zap.String("rule_id", string(rule.ID)),
+				zap.String("metric_rule_uid", rule.MetricRuleUID))
 			continue
 		}
 
-		exceeded, severity, threshold := s.checkThreshold(*rule, rule.Operator, floatValue)
+		matchRuleCounter++
+		s.logger.Debug("找到對應的告警規則",
+			zap.String("rule_id", string(rule.ID)),
+			zap.String("metric_rule_uid", rule.MetricRuleUID))
+
+		// 獲取 metric 數據
+		metricKey := metricRule.MetricRawName
+		if rule.Target.PartitionName != "" {
+			metricKey = metricKey + ":" + rule.Target.PartitionName
+		}
+
+		metricValues, ok := payload.Data.Metrics[metricKey]
+		if !ok {
+			s.logger.Debug("找不到對應的 metric 數據",
+				zap.String("metric_key", metricKey))
+			continue
+		}
+
+		// 將 MetricValue 轉換為 MetricPoint
+		var metricData []models.MetricValue
+		for _, mv := range metricValues {
+			metricData = append(metricData, models.MetricValue{
+				Timestamp: mv.Timestamp,
+				Value:     mv.Value,
+			})
+		}
+
+		// 4. 檢查告警邏輯
+		currentTime := time.Now().Unix()
+		exceeded, value, severity := s.CheckSingle(&rule, metricData, currentTime)
 		if !exceeded {
-			allExceeded = false
-		}
-
-		rule.TriggerValue = floatValue
-		rule.Threshold = threshold
-		rule.Severity = severity
-		lastValue = floatValue
-	}
-
-	return allExceeded, lastValue, now
-}
-
-// * ======================== 4.amplitude.go 振幅 ========================
-func (s *Service) CheckAmplitude(rule *models.CheckRule, file models.FileInfo, metrics []map[string]interface{}, state models.AlertState) (bool, float64, int64) {
-	if len(metrics) < 2 {
-		return false, 0, 0 // 需要至少兩筆數據來比較
-	}
-
-	now := time.Now().Unix()
-	var maxValue, minValue float64
-
-	dataRange := metrics[max(0, len(metrics)-rule.Duration):]
-	for _, data := range dataRange {
-		floatValue, err := s.parseMetricValue(data["value"])
-		if err != nil {
+			s.logger.Debug("未觸發告警",
+				zap.String("rule_id", string(rule.ID)),
+				zap.Float64("value", value))
 			continue
 		}
 
-		if floatValue > maxValue {
-			maxValue = floatValue
+		// 5. 更新告警狀態
+		newState, err := s.updateAlertState(rule, value, severity, currentTime)
+		if err != nil {
+			s.logger.Error("更新告警狀態失敗",
+				zap.String("rule_id", string(rule.ID)),
+				zap.Error(err))
+			continue
 		}
-		if floatValue < minValue || minValue == 0 {
-			minValue = floatValue
+
+		// 6. 處理觸發日誌
+		if err := s.processTriggerLog(rule, metricRule, *newState, value, severity, currentTime); err != nil {
+			s.logger.Error("處理觸發日誌失敗",
+				zap.String("rule_id", string(rule.ID)),
+				zap.Error(err))
+			continue
 		}
+
+		triggeredRuleCounter++
 	}
 
-	amplitude := ((maxValue - minValue) / minValue) * 100
-	exceeded, severity, threshold := s.checkThreshold(*rule, rule.Operator, amplitude)
+	s.logger.Info("告警檢查完成",
+		zap.String("realm", payload.Metadata.RealmName),
+		zap.String("resource", payload.Metadata.ResourceName),
+		zap.Int("match_rule_count", matchRuleCounter),
+		zap.Int("triggered_rule_count", triggeredRuleCounter))
 
-	rule.TriggerValue = amplitude
-	rule.Threshold = threshold
-	rule.Severity = severity
-
-	return exceeded, amplitude, now
+	return nil
 }
-
-// * ======================== 3.check.go 檢查告警邏輯 ========================
-// 更新異常狀態
-// parseMetricValue 解析數值
 
 // 檢查閾值並返回嚴重程度
-func (s *Service) checkThreshold(rule models.CheckRule, operator string, value float64) (bool, string, *float64) {
+func (s *Service) checkThreshold(rule models.Rule, operator string, value float64) (bool, string, *float64) {
 
 	var severity string
 
-	switch operator {
-	case ">", ">=":
-		if rule.CritThreshold != nil && value > *rule.CritThreshold {
-			return true, s.global.Code.Severity.Crit.Name, rule.CritThreshold
+	switch strings.ToLower(operator) {
+	case "gt":
+		if rule.CritThreshold != 0 && value > rule.CritThreshold {
+			return true, s.global.Code.Severity.Crit.Name, &rule.CritThreshold
 		}
 		if rule.WarnThreshold != nil && value > *rule.WarnThreshold {
 			return true, s.global.Code.Severity.Warn.Name, rule.WarnThreshold
@@ -491,9 +668,9 @@ func (s *Service) checkThreshold(rule models.CheckRule, operator string, value f
 		if rule.InfoThreshold != nil && value > *rule.InfoThreshold {
 			return true, s.global.Code.Severity.Info.Name, rule.InfoThreshold
 		}
-	case "<", "<=":
-		if rule.CritThreshold != nil && value < *rule.CritThreshold {
-			return true, s.global.Code.Severity.Crit.Name, rule.CritThreshold
+	case "lt":
+		if rule.CritThreshold != 0 && value < rule.CritThreshold {
+			return true, s.global.Code.Severity.Crit.Name, &rule.CritThreshold
 		}
 		if rule.WarnThreshold != nil && value < *rule.WarnThreshold {
 			return true, s.global.Code.Severity.Warn.Name, rule.WarnThreshold
@@ -505,305 +682,615 @@ func (s *Service) checkThreshold(rule models.CheckRule, operator string, value f
 	return false, severity, nil
 }
 
-// checkJoint 聯合檢查
-func (s *Service) CheckJoint(rule models.CheckRule, file models.FileInfo, metrics []map[string]interface{}, state models.AlertState) bool {
-	// TODO: 實作聯合檢查: 同時滿足絕對值和振幅條件
-	return false
-}
-
-// checkSingle 單一檢查
-func (s *Service) CheckSingle(rule *models.CheckRule, file models.FileInfo, metrics []map[string]interface{}, state models.AlertState) (bool, float64, int64) {
-	switch rule.CheckType {
-	case "absolute":
-		return s.CheckAbsolute(rule, file, metrics, state)
-	case "amplitude":
-		return s.CheckAmplitude(rule, file, metrics, state)
-	default:
-		s.logger.Error("未知的規則類型", zap.String("type", rule.CheckType))
-		return false, 0, 0
-	}
-}
-
-//* ======================== 5.trigger_log.go 觸發日誌 ========================
-
-// 根據通知管道分組 [contact.ID + contact.Type + rule.RuleState]
-func (s *Service) groupTriggerLogs(triggers []models.TriggerLog, isResolved bool) map[string][]models.TriggerLog {
-	groups := make(map[string][]models.TriggerLog)
-
-	if len(triggers) == 0 {
-		return groups
-	}
-
-	for _, trigger := range triggers {
-		var ruleState string
-		if trigger.ResolvedTime != nil {
-			ruleState = "resolved"
-		} else {
-			ruleState = "alerting"
-		}
-		for _, contact := range trigger.Contacts {
-			if isResolved && !contact.SentResolved {
-				continue
+// CheckSingle 檢查單個規則是否觸發告警
+func (s *Service) CheckSingle(rule *models.Rule, metricData []models.MetricValue, currentTime int64) (bool, float64, string) {
+	// 獲取對應的 MetricRule
+	var metricRule models.MetricRule
+	for _, rules := range s.metricRules {
+		for _, r := range rules {
+			if r.UID == rule.MetricRuleUID {
+				metricRule = r
+				break
 			}
-			key := fmt.Sprintf("%d_%s_%s", contact.ID, contact.Type, ruleState)
-			groups[key] = append(groups[key], trigger)
+		}
+		if metricRule.UID != "" {
+			break
 		}
 	}
-	return groups
+
+	if metricRule.UID == "" {
+		s.logger.Error("找不到對應的 MetricRule",
+			zap.String("metric_rule_uid", rule.MetricRuleUID))
+		return false, 0, ""
+	}
+
+	// 檢查數據是否足夠
+	if len(metricData) == 0 {
+		s.logger.Warn("沒有數據可供檢查",
+			zap.String("rule_id", string(rule.ID)))
+		return false, 0, ""
+	}
+
+	// 根據 detection_type 選擇檢查方法
+	switch metricRule.DetectionType {
+	case "absolute":
+		return s.checkAbsolute(rule, metricData, metricRule)
+	case "amplitude":
+		return s.checkAmplitude(rule, metricData, metricRule)
+	default:
+		// 默認使用 absolute 檢查
+		return s.checkAbsolute(rule, metricData, metricRule)
+	}
 }
 
-func (s *Service) writeResolvedLog(rule models.CheckRule, state models.AlertState) error {
-	// 確保已經有 TriggerLog
-	exists, err := s.mysql.CheckTriggerLogExists(rule.RuleDetailID, rule.ResourceName, rule.MetricName, state.FirstTriggerTime)
-	if err != nil {
-		return err
+// checkAbsolute 檢查絕對值是否超過閾值
+func (s *Service) checkAbsolute(rule *models.Rule, metricData []models.MetricValue, metricRule models.MetricRule) (bool, float64, string) {
+	// 檢查數據是否足夠
+	if len(metricData) == 0 {
+		return false, 0, ""
 	}
-	if !exists {
-		s.logger.Warn("找不到對應的 TriggerLog，無法寫入 ResolvedLog",
-			zap.Int64("rule_id", rule.RuleID),
-			zap.String("resource", rule.ResourceName),
-			zap.String("metric", rule.MetricName))
+
+	// 獲取時間窗口（Duration）
+	durationSeconds := 300 // 默認 5 分鐘
+	if rule.Duration != "" {
+		// 解析 duration 字符串，例如 "5m"、"1h" 等
+		durationValue, unit := parseDuration(rule.Duration)
+		switch unit {
+		case "s":
+			durationSeconds = durationValue
+		case "m":
+			durationSeconds = durationValue * 60
+		case "h":
+			durationSeconds = durationValue * 3600
+		case "d":
+			durationSeconds = durationValue * 86400
+		}
+	}
+
+	// 獲取時間窗口內的數據點
+	latestTimestamp := metricData[len(metricData)-1].Timestamp
+	windowStartTimestamp := latestTimestamp - int64(durationSeconds)
+
+	var windowData []models.MetricValue
+	for _, point := range metricData {
+		if point.Timestamp >= windowStartTimestamp {
+			windowData = append(windowData, point)
+		}
+	}
+
+	// 如果窗口內沒有足夠的數據點，則使用所有可用的數據點
+	if len(windowData) < 2 {
+		windowData = metricData
+	}
+
+	// 檢查窗口內的所有數據點是否都超過閾值
+	exceededCount := 0
+	totalPoints := len(windowData)
+	var lastValue float64
+	var lastSeverity string
+
+	// 檢查每個數據點
+	for _, point := range windowData {
+		value := point.Value * metricRule.Scale
+		lastValue = value // 記錄最後檢查的值
+
+		// 檢查是否超過閾值
+		operator := metricRule.Operator
+		if operator == "" {
+			operator = "gt" // 默認為大於
+		}
+
+		// 檢查嚴重程度（從高到低）
+		exceeded := false
+		if rule.CritThreshold > 0 {
+			if (operator == "gt" && value > rule.CritThreshold) ||
+				(operator == "lt" && value < rule.CritThreshold) {
+				exceeded = true
+				lastSeverity = "crit"
+			}
+		}
+
+		if !exceeded && rule.WarnThreshold != nil && *rule.WarnThreshold > 0 {
+			if (operator == "gt" && value > *rule.WarnThreshold) ||
+				(operator == "lt" && value < *rule.WarnThreshold) {
+				exceeded = true
+				lastSeverity = "warn"
+			}
+		}
+
+		if !exceeded && rule.InfoThreshold != nil && *rule.InfoThreshold > 0 {
+			if (operator == "gt" && value > *rule.InfoThreshold) ||
+				(operator == "lt" && value < *rule.InfoThreshold) {
+				exceeded = true
+				lastSeverity = "info"
+			}
+		}
+
+		if exceeded {
+			exceededCount++
+		}
+	}
+
+	// 檢查是否所有數據點都超過閾值
+	// 如果窗口內的所有數據點都超過閾值，則觸發告警
+	if exceededCount == totalPoints && totalPoints > 0 {
+		return true, lastValue, lastSeverity
+	}
+
+	// 如果沒有達到所需的條件，則返回未觸發
+	return false, lastValue, ""
+}
+
+// checkAmplitude 檢查振幅是否超過閾值
+func (s *Service) checkAmplitude(rule *models.Rule, metricData []models.MetricValue, metricRule models.MetricRule) (bool, float64, string) {
+	// 檢查數據是否足夠
+	if len(metricData) < 2 {
+		return false, 0, ""
+	}
+
+	// 獲取時間窗口
+	durationSeconds := 300 // 默認 5 分鐘
+	if rule.Duration != "" {
+		// 解析 duration 字符串，例如 "5m"、"1h" 等
+		durationValue, unit := parseDuration(rule.Duration)
+		switch unit {
+		case "s":
+			durationSeconds = durationValue
+		case "m":
+			durationSeconds = durationValue * 60
+		case "h":
+			durationSeconds = durationValue * 3600
+		case "d":
+			durationSeconds = durationValue * 86400
+		}
+	}
+
+	// 獲取時間窗口內的數據點
+	latestTimestamp := metricData[len(metricData)-1].Timestamp
+	windowStartTimestamp := latestTimestamp - int64(durationSeconds)
+
+	var windowData []models.MetricValue
+	for _, point := range metricData {
+		if point.Timestamp >= windowStartTimestamp {
+			windowData = append(windowData, point)
+		}
+	}
+
+	// 如果窗口內沒有足夠的數據點，則使用所有可用的數據點
+	if len(windowData) < 2 {
+		windowData = metricData
+	}
+
+	// 計算最大值和最小值
+	var maxValue, minValue float64
+	maxValue = windowData[0].Value * metricRule.Scale
+	minValue = windowData[0].Value * metricRule.Scale
+
+	for _, point := range windowData {
+		value := point.Value * metricRule.Scale
+		if value > maxValue {
+			maxValue = value
+		}
+		if value < minValue {
+			minValue = value
+		}
+	}
+
+	// 計算振幅
+	if minValue == 0 {
+		// 避免除以零
+		minValue = 0.000001
+	}
+	amplitude := (maxValue - minValue) / minValue * 100
+
+	// 檢查是否超過閾值
+	if rule.CritThreshold > 0 && amplitude > rule.CritThreshold {
+		return true, amplitude, "crit"
+	}
+
+	if rule.WarnThreshold != nil && *rule.WarnThreshold > 0 && amplitude > *rule.WarnThreshold {
+		return true, amplitude, "warn"
+	}
+
+	if rule.InfoThreshold != nil && *rule.InfoThreshold > 0 && amplitude > *rule.InfoThreshold {
+		return true, amplitude, "info"
+	}
+
+	return false, amplitude, ""
+}
+
+// 解析 duration 字符串，例如 "5m"、"1h" 等
+func parseDuration(duration string) (int, string) {
+	if duration == "" {
+		return 5, "m" // 默認 5 分鐘
+	}
+
+	// 找到數字和單位
+	var valueStr string
+	var unit string
+
+	for i, c := range duration {
+		if c >= '0' && c <= '9' {
+			valueStr += string(c)
+		} else {
+			unit = duration[i:]
+			break
+		}
+	}
+
+	value, err := strconv.Atoi(valueStr)
+	if err != nil || value <= 0 {
+		return 5, "m" // 默認 5 分鐘
+	}
+
+	return value, unit
+}
+
+// CheckPayload 初步驗證 AlertPayload
+func (s *Service) CheckPayload(payload models.AlertPayload) error {
+	// 檢查 metadata 是否完整
+	if payload.Metadata.RealmName == "" {
+		return fmt.Errorf("realm_name 不能為空")
+	}
+	if payload.Metadata.DataSource == "" {
+		return fmt.Errorf("datasource_type 不能為空")
+	}
+	if payload.Metadata.ResourceName == "" {
+		return fmt.Errorf("resource_name 不能為空")
+	}
+	if payload.Metadata.Timestamp == 0 {
+		return fmt.Errorf("timestamp 不能為空")
+	}
+
+	// 檢查 data 是否有數據
+	if len(payload.Data.Metrics) == 0 {
+		return fmt.Errorf("metrics 不能為空")
+	}
+
+	// 檢查每個 metric 的數據格式
+	for metricKey, metricData := range payload.Data.Metrics {
+		if len(metricData) == 0 {
+			return fmt.Errorf("metric %s 的數據不能為空", metricKey)
+		}
+
+		// 檢查 metric key 格式是否正確 (metric_name:partition_name)
+		parts := strings.Split(metricKey, ":")
+		if len(parts) < 2 {
+			return fmt.Errorf("metric key %s 格式不正確，應為 metric_name:partition_name", metricKey)
+		}
+
+		// 檢查每個數據點是否有 timestamp 和 value
+		for i, point := range metricData {
+			if point.Timestamp == 0 {
+				return fmt.Errorf("metric %s 的第 %d 個數據點缺少 timestamp", metricKey, i)
+			}
+		}
+	}
+
+	return nil
+}
+
+// updateAlertState 更新告警狀態
+func (s *Service) updateAlertState(rule models.Rule, triggeredValue float64, severity string, currentTime int64) (*models.RuleState, error) {
+	// 獲取當前規則狀態並鎖定
+	oldState, err := s.mysql.GetRuleStateAndLock(rule.ID)
+	if err != nil {
+		return nil, fmt.Errorf("獲取規則狀態失敗: %w", err)
+	}
+
+	if oldState == nil {
+		// 如果沒有狀態記錄，創建一個新的
+		oldState = &models.RuleState{
+			RuleID:         rule.ID,
+			State:          "normal",
+			ContactState:   "normal",
+			ContactCounter: 0,
+		}
+	}
+
+	// 創建新狀態，初始化為舊狀態的副本
+	newState := *oldState
+
+	// 更新最後檢查值
+	newState.LastCheckValue = triggeredValue
+
+	// 檢查是否在靜默期內
+	inSilencePeriod := false
+	if newState.SilenceStartAt != nil && newState.SilenceEndAt != nil {
+		if currentTime >= *newState.SilenceStartAt && currentTime < *newState.SilenceEndAt {
+			inSilencePeriod = true
+		} else if currentTime >= *newState.SilenceEndAt {
+			// 靜默期結束，重置靜默期和通知計數器
+			newState.SilenceStartAt = nil
+			newState.SilenceEndAt = nil
+			newState.ContactState = "normal"
+			newState.ContactCounter = 0
+		}
+	}
+
+	// 根據是否觸發異常更新狀態
+	if severity != "" {
+		// 異常觸發
+		newState.LastTriggeredValue = &triggeredValue
+		newState.LastTriggeredSeverity = &severity
+		newState.LastTriggeredAt = &currentTime
+
+		// 如果是首次觸發，記錄首次觸發時間
+		if newState.FirstTriggeredAt == nil {
+			newState.FirstTriggeredAt = &currentTime
+		}
+
+		// 計算堆疊持續時間
+		var duration int64
+		if rule.Duration != "" {
+			// 解析持續時間字符串，例如 "5m"
+			durationStr := rule.Duration
+			unit := durationStr[len(durationStr)-1:]
+			value, _ := strconv.Atoi(durationStr[:len(durationStr)-1])
+
+			switch unit {
+			case "s":
+				duration = int64(value)
+			case "m":
+				duration = int64(value * 60)
+			case "h":
+				duration = int64(value * 3600)
+			default:
+				duration = 300 // 默認 5 分鐘
+			}
+		} else {
+			duration = 300 // 默認 5 分鐘
+		}
+
+		// 檢查是否超過持續時間
+		stackDuration := currentTime - *newState.FirstTriggeredAt
+
+		// 如果超過持續時間，則更新為 alerting
+		if stackDuration >= duration {
+			// 如果狀態不是 alerting，則更新為 alerting
+			if newState.State != "alerting" {
+				newState.State = "alerting"
+			}
+
+			// 如果狀態是 alerting，則增加通知計數器
+			if newState.State == "alerting" && !inSilencePeriod {
+				newState.ContactCounter++
+
+				// 檢查是否達到連續觸發通知的次數
+				requiredTimes := rule.Times
+				if requiredTimes <= 0 {
+					requiredTimes = 1 // 默認至少需要一次
+				}
+
+				// 如果達到連續觸發次數，則設置靜默期
+				if newState.ContactCounter >= requiredTimes {
+					// 設置靜默期開始時間
+					newState.SilenceStartAt = &currentTime
+
+					// 計算靜默期結束時間
+					var silencePeriod int64
+					if rule.SilencePeriod != "" {
+						// 解析靜默期字符串，例如 "1h"
+						silenceStr := rule.SilencePeriod
+						unit := silenceStr[len(silenceStr)-1:]
+						value, _ := strconv.Atoi(silenceStr[:len(silenceStr)-1])
+
+						switch unit {
+						case "s":
+							silencePeriod = int64(value)
+						case "m":
+							silencePeriod = int64(value * 60)
+						case "h":
+							silencePeriod = int64(value * 3600)
+						case "d":
+							silencePeriod = int64(value * 86400)
+						default:
+							silencePeriod = 3600 // 默認 1 小時
+						}
+					} else {
+						silencePeriod = 3600 // 默認 1 小時
+					}
+
+					// 設置靜默期結束時間
+					silenceEndAt := currentTime + silencePeriod
+					newState.SilenceEndAt = &silenceEndAt
+
+					// 更新通知狀態
+					newState.ContactState = "silenced"
+				}
+			}
+		}
+	} else {
+		// 恢復正常
+		if newState.State == "alerting" {
+			// 如果之前是 alerting 狀態，則更新為 resolved
+			newState.State = "resolved"
+			// 這裡可以添加恢復告警的邏輯
+		} else {
+			newState.State = "normal"
+		}
+
+		// 清除觸發相關信息
+		newState.FirstTriggeredAt = nil
+		newState.LastTriggeredSeverity = nil
+
+		// 如果不在靜默期內，重置通知計數器
+		if !inSilencePeriod {
+			newState.ContactCounter = 0
+			newState.ContactState = "normal"
+		}
+	}
+
+	// 更新數據庫
+	if err := s.mysql.UpdateRuleStateWithUpdates(*oldState, newState); err != nil {
+		return nil, fmt.Errorf("更新規則狀態失敗: %w", err)
+	}
+
+	return &newState, nil
+}
+
+// processTriggerLog 建立或更新 TriggeredLog 記錄
+func (s *Service) processTriggerLog(rule models.Rule, metricRule models.MetricRule, state models.RuleState, triggeredValue float64, severity string, currentTime int64) error {
+	// 檢查是否在靜默期內
+	inSilencePeriod := false
+	if state.SilenceStartAt != nil && state.SilenceEndAt != nil {
+		if currentTime >= *state.SilenceStartAt && currentTime < *state.SilenceEndAt {
+			inSilencePeriod = true
+			s.logger.Debug("規則處於靜默期，跳過通知",
+				zap.String("rule_id", string(rule.ID)),
+				zap.Int64("silence_start", *state.SilenceStartAt),
+				zap.Int64("silence_end", *state.SilenceEndAt),
+				zap.Int64("current_time", currentTime))
+		}
+	}
+
+	// 如果在靜默期內且通知狀態為 silenced，則跳過通知
+	if inSilencePeriod && state.ContactState == "silenced" {
+		s.logger.Debug("規則處於靜默期且通知狀態為 silenced，跳過通知",
+			zap.String("rule_id", string(rule.ID)))
 		return nil
 	}
 
-	// **更新 TriggerLog 狀態**
-	err = s.mysql.UpdateTriggerLogResolved(rule.RuleID, rule.ResourceName, rule.MetricName, state.LastTriggerTime)
-	if err != nil {
-		s.logger.Error("更新 TriggerLog 為 resolved 失敗",
-			zap.Int64("rule_id", rule.RuleID),
-			zap.String("resource", rule.ResourceName),
-			zap.String("metric", rule.MetricName),
-			zap.Error(err))
-		return err
+	// 檢查是否需要創建新的 TriggeredLog
+	if state.State == "alerting" && (state.LastTriggeredLogID == nil || len(*state.LastTriggeredLogID) == 0) {
+		// 需要創建新的 TriggeredLog
+		return s.createTriggeredLog(rule, metricRule, state, triggeredValue, severity, currentTime)
+	} else if state.State == "alerting" && state.LastTriggeredLogID != nil && len(*state.LastTriggeredLogID) > 0 {
+		// 需要更新現有的 TriggeredLog
+		return s.updateTriggeredLog(rule, metricRule, state, triggeredValue, severity, currentTime)
+	} else if state.State == "resolved" && state.LastTriggeredLogID != nil && len(*state.LastTriggeredLogID) > 0 {
+		// 需要標記 TriggeredLog 為已解決
+		return s.resolveTriggeredLog(rule, state, currentTime)
 	}
 
 	return nil
 }
 
-//* ======================== 6.notify_log.go 通知日誌 ========================
-
-// 批次處理觸發日誌
-func (s *Service) ProcessNotifyLog() error {
-	timestamp := time.Now().Unix()
-	successAlertCounter, failAlertCounter := 0, 0
-	successResolvedCounter, failResolvedCounter := 0, 0
-
-	// **1️⃣ 查詢異常通知**
-	triggerLogs, err := s.mysql.GetTriggerLogsForAlertNotify(timestamp)
+// createTriggeredLog 創建新的 TriggeredLog
+func (s *Service) createTriggeredLog(rule models.Rule, metricRule models.MetricRule, state models.RuleState, triggeredValue float64, severity string, currentTime int64) error {
+	// 序列化 rule 和 state 為 JSON
+	ruleSnapshot, err := json.Marshal(rule)
 	if err != nil {
-		s.logger.Error("獲取待發送異常通知的 TriggerLog 失敗", zap.Error(err))
-		return err
+		return fmt.Errorf("序列化 rule 失敗: %w", err)
 	}
 
-	// **2️⃣ 查詢恢復通知**
-	resolvedLogs, err := s.mysql.GetTriggerLogsForResolvedNotify(timestamp)
+	stateSnapshot, err := json.Marshal(state)
 	if err != nil {
-		s.logger.Error("獲取待發送恢復通知的 TriggerLog 失敗", zap.Error(err))
-		return err
+		return fmt.Errorf("序列化 state 失敗: %w", err)
 	}
 
-	// **3️⃣ 根據通知管道分組**
-	groupTriggerLogs := s.groupTriggerLogs(triggerLogs, false)  // 分組異常通知
-	groupResolvedLogs := s.groupTriggerLogs(resolvedLogs, true) // 分組恢復通知
-
-	// **4️⃣ 發送異常通知**
-	for key, groupTriggerLog := range groupTriggerLogs {
-		notifyLog := s.generateNotifyLog(key, groupTriggerLog)
-
-		sendErr := s.sendNotifyLog(&notifyLog)
-		if sendErr != nil {
-			failAlertCounter++
-			s.logger.Error("發送異常通知失敗", zap.Error(sendErr))
-			notifyLog.NotifyState = s.global.Code.State.Notify.Failed.Name
-			notifyLog.Error = sendErr.Error()
-		} else {
-			successAlertCounter++
-			now := time.Now().Unix()
-			notifyLog.NotifyState = s.global.Code.State.Notify.Solved.Name
-			notifyLog.SentAt = &now
-		}
-
-		// **更新 TriggerLog 狀態**
-		for _, trigger := range groupTriggerLog {
-			err = s.mysql.UpdateTriggerLogNotifyState(trigger.UUID, notifyLog.NotifyState)
-			if err != nil {
-				s.logger.Error("更新 TriggerLog 通知狀態失敗", zap.Error(err))
-			}
-		}
-
-		// **記錄 NotifyLog**
-		err = s.mysql.CreateNotifyLog(notifyLog)
-		if err != nil {
-			s.logger.Error("寫入 NotifyLog 失敗", zap.Error(err))
-		}
+	// 將 []byte 轉換為 common.JSONMap
+	var ruleJSONMap common.JSONMap
+	if err := json.Unmarshal(ruleSnapshot, &ruleJSONMap); err != nil {
+		return fmt.Errorf("將 rule 轉換為 JSONMap 失敗: %w", err)
 	}
 
-	// **5️⃣ 發送恢復通知**
-	for key, groupResolvedLog := range groupResolvedLogs {
-		notifyLog := s.generateNotifyLog(key, groupResolvedLog)
-
-		sendErr := s.sendNotifyLog(&notifyLog)
-		if sendErr != nil {
-			failResolvedCounter++
-			s.logger.Error("發送恢復通知失敗", zap.Error(sendErr))
-			notifyLog.NotifyState = s.global.Code.State.Notify.Failed.Name
-			notifyLog.Error = sendErr.Error()
-		} else {
-			successResolvedCounter++
-			now := time.Now().Unix()
-			notifyLog.NotifyState = s.global.Code.State.Notify.Solved.Name
-			notifyLog.SentAt = &now
-		}
-
-		// **更新 TriggerLog 狀態**
-		for _, trigger := range groupResolvedLog {
-			err = s.mysql.UpdateTriggerLogResolvedNotifyState(trigger.UUID, notifyLog.NotifyState)
-			if err != nil {
-				s.logger.Error("更新 TriggerLog 恢復通知狀態失敗", zap.Error(err))
-			}
-		}
-
-		// **記錄 NotifyLog**
-		err = s.mysql.CreateNotifyLog(notifyLog)
-		if err != nil {
-			s.logger.Error("寫入 NotifyLog 失敗", zap.Error(err))
-		}
+	var stateJSONMap common.JSONMap
+	if err := json.Unmarshal(stateSnapshot, &stateJSONMap); err != nil {
+		return fmt.Errorf("將 state 轉換為 JSONMap 失敗: %w", err)
 	}
 
-	// **6️⃣ 結束 Log**
-	s.logger.Info("批次處理發送通知日誌完成",
-		zap.Int("success_alert_count", successAlertCounter),
-		zap.Int("fail_alert_count", failAlertCounter),
-		zap.Int("success_resolved_count", successResolvedCounter),
-		zap.Int("fail_resolved_count", failResolvedCounter))
+	// 創建 TriggeredLog
+	triggeredLog := models.TriggeredLog{
+		RealmName:         rule.RealmName,
+		TriggeredAt:       currentTime,
+		LastTriggeredAt:   currentTime,
+		ResourceName:      rule.Target.ResourceName,
+		PartitionName:     rule.Target.PartitionName,
+		MetricRuleUID:     metricRule.UID,
+		RuleID:            rule.ID,
+		RuleSnapshot:      ruleJSONMap,
+		RuleStateSnapshot: stateJSONMap,
+		Severity:          severity,
+		TriggeredValue:    triggeredValue,
+		Threshold:         *state.LastTriggeredValue,
+	}
+
+	// 保存到數據庫
+	if err := s.mysql.CreateTriggeredLog(triggeredLog); err != nil {
+		return fmt.Errorf("創建 TriggeredLog 失敗: %w", err)
+	}
+
+	// 更新 rule_state 的 last_triggered_log_id
+	newState := state
+	logID := triggeredLog.ID
+
+	// 創建一個 JSONMap 來存儲 logID
+	var logIDMap common.JSONMap
+	logIDBytes, err := json.Marshal(logID)
+	if err != nil {
+		return fmt.Errorf("序列化 logID 失敗: %w", err)
+	}
+
+	if err := json.Unmarshal(logIDBytes, &logIDMap); err != nil {
+		return fmt.Errorf("將 logID 轉換為 JSONMap 失敗: %w", err)
+	}
+
+	newState.LastTriggeredLogID = &logIDMap
+
+	// 更新數據庫
+	if err := s.mysql.UpdateRuleStateWithUpdates(state, newState); err != nil {
+		return fmt.Errorf("更新 rule_state 的 last_triggered_log_id 失敗: %w", err)
+	}
 
 	return nil
 }
 
-// 創建通知日誌
-func (s *Service) generateNotifyLog(key string, triggers []models.TriggerLog) models.NotifyLog {
-	now := time.Now().Unix()
-
-	// 解析聯絡人資訊
-	parts := strings.Split(key, "_")
-	contactID, _ := strconv.ParseInt(parts[0], 10, 64)
-	contactType := parts[1]
-	ruleState := parts[2]
-	contact, err := s.contactService.Get(contactID)
+// updateTriggeredLog 更新現有的 TriggeredLog
+func (s *Service) updateTriggeredLog(rule models.Rule, metricRule models.MetricRule, state models.RuleState, triggeredValue float64, severity string, currentTime int64) error {
+	// 獲取現有的 TriggeredLog
+	triggeredLog, err := s.mysql.GetActiveTriggeredLog(rule.ID, rule.Target.ResourceName, metricRule.MetricRawName)
 	if err != nil {
-		s.logger.Error("獲取聯絡人資訊失敗", zap.Error(err))
-	}
-	notifyFormat := GetFormatByType(contactType) // 🔹 自動匹配 format
-
-	// 取得對應的模板
-	template, err := s.mysql.GetTemplate(contact.RealmName, ruleState, notifyFormat)
-	if err != nil {
-		s.logger.Error("獲取對應的模板失敗", zap.Error(err))
+		return fmt.Errorf("獲取 TriggeredLog 失敗: %w", err)
 	}
 
-	// 準備通知內容
-	data := map[string]interface{}{
-		"timestamp":     time.Unix(now, 0).Format("2006-01-02 15:04:05"),
-		"resource_name": triggers[0].ResourceName,
-		"rule_name":     triggers[0].RuleName,
-		"severity":      triggers[0].Severity,
-		"current_value": triggers[0].TriggerValue,
-		"threshold":     triggers[0].Threshold,
-		"unit":          triggers[0].Unit,
-		"labels":        triggers[0].Labels,
+	// 如果沒有找到活動的 TriggeredLog，則創建一個新的
+	if triggeredLog == nil {
+		return s.createTriggeredLog(rule, metricRule, state, triggeredValue, severity, currentTime)
 	}
 
-	// 渲染通知內容
-	message, err := s.templateService.RenderMessage(template, data)
-	if err != nil {
-		s.logger.Error("渲染通知內容失敗", zap.Error(err))
-		message = "告警通知發生錯誤，請聯繫管理員"
+	// 更新 TriggeredLog
+	triggeredLog.LastTriggeredAt = currentTime
+	triggeredLog.TriggeredValue = triggeredValue
+	triggeredLog.Severity = severity
+
+	// 保存到數據庫
+	if err := s.mysql.UpdateTriggeredLog(*triggeredLog); err != nil {
+		return fmt.Errorf("更新 TriggeredLog 失敗: %w", err)
 	}
 
-	notify := models.NotifyLog{
-		UUID:        uuid.New().String(),
-		Timestamp:   now,
-		ContactID:   contactID,
-		ContactName: contact.Name,
-		ContactType: contactType,
-
-		Title:        template.Title,
-		Message:      message,
-		RetryCounter: 0,
-		TriggerLogs:  make([]*models.TriggerLog, len(triggers)),
-	}
-
-	// 複製 TriggerLog 指針
-	for i := range triggers {
-		notify.TriggerLogs[i] = &triggers[i]
-	}
-
-	return notify
+	return nil
 }
 
-//* ======================== 7.notify_sent.go 通知發送 ========================
-
-func (s *Service) sendNotifyLog(notify *models.NotifyLog) error {
-	// 檢查重試次數
-	if notify.RetryCounter >= notify.ContactMaxRetry {
-		notify.NotifyState = "failed"
-		notify.Error = fmt.Sprintf("超過最大重試次數 %d", notify.ContactMaxRetry)
-		if err := s.mysql.UpdateNotifyLog(*notify); err != nil {
-			s.logger.Error("更新通知狀態失敗",
-				zap.String("uuid", notify.UUID),
-				zap.Error(err))
-		}
-		return fmt.Errorf("超過最大重試次數 %d", notify.ContactMaxRetry)
-	}
-
-	// 更新重試次數和狀態
-	notify.RetryCounter++
-	notify.NotifyState = "sending"
-	notify.LastRetryTime = time.Now().Unix()
-
-	if err := s.mysql.UpdateNotifyLog(*notify); err != nil {
-		return fmt.Errorf("更新通知日誌失敗: %w", err)
-	}
-
-	// 發送通知
-	notify.ContactConfig["title"] = notify.Title
-	notify.ContactConfig["message"] = notify.Message
-	err := s.notifyService.Send(common.NotifySetting{
-		Type:   notify.ContactType,
-		Config: notify.ContactConfig,
-	})
-
-	now := time.Now().Unix()
+// resolveTriggeredLog 標記 TriggeredLog 為已解決
+func (s *Service) resolveTriggeredLog(rule models.Rule, state models.RuleState, currentTime int64) error {
+	// 獲取現有的 TriggeredLog
+	triggeredLog, err := s.mysql.GetActiveTriggeredLog(rule.ID, rule.Target.ResourceName, "")
 	if err != nil {
-		notify.NotifyState = "failed"
-		notify.Error = err.Error()
-		notify.LastFailedTime = now
-	} else {
-		notify.NotifyState = "sent"
-		notify.SentAt = &now
-		notify.Error = ""
+		return fmt.Errorf("獲取 TriggeredLog 失敗: %w", err)
 	}
 
-	// 更新發送結果
-	if err := s.mysql.UpdateNotifyLog(*notify); err != nil {
-		s.logger.Error("更新通知狀態失敗",
-			zap.String("uuid", notify.UUID),
-			zap.Error(err))
+	// 如果沒有找到活動的 TriggeredLog，則無需處理
+	if triggeredLog == nil {
+		return nil
 	}
 
-	return err
-}
+	// 標記為已解決
+	triggeredLog.ResolvedAt = &currentTime
 
-// GetFormatByType 根據通知類型獲取對應的通知格式
-func GetFormatByType(contactType string) string {
-	switch contactType {
-	case "email":
-		return "html"
-	case "slack", "discord", "teams", "webex", "line":
-		return "markdown"
-	case "webhook":
-		return "json"
-	default:
-		return "text"
+	// 保存到數據庫
+	if err := s.mysql.UpdateTriggeredLog(*triggeredLog); err != nil {
+		return fmt.Errorf("更新 TriggeredLog 為已解決失敗: %w", err)
 	}
+
+	// 清除 rule_state 的 last_triggered_log_id
+	newState := state
+	newState.LastTriggeredLogID = nil
+
+	// 更新數據庫
+	if err := s.mysql.UpdateRuleStateWithUpdates(state, newState); err != nil {
+		return fmt.Errorf("清除 rule_state 的 last_triggered_log_id 失敗: %w", err)
+	}
+
+	return nil
 }
