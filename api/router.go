@@ -10,20 +10,28 @@ import (
 
 	"github.com/detect-viz/shared-lib/alert"
 	"github.com/detect-viz/shared-lib/api/controller"
+	"github.com/detect-viz/shared-lib/auth/keycloak"
 
+	_ "github.com/detect-viz/shared-lib/docs"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 	"go.uber.org/zap"
 )
 
 // 設定 API 路由
+func RegisterRoutes(alertService *alert.Service, keycloak keycloak.Client) *gin.Engine {
+	if alertService == nil {
+		panic("🚨 alertService 未初始化！請檢查 Wire 依賴注入")
+	}
 
-func RegisterRoutes(alertService *alert.Service) *gin.Engine {
 	router := gin.Default()
+	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	router.Use(CorsConfig(), GinLogger(alertService), GinRecovery(false, alertService))
 
 	// 調用 controller 內的方法來註冊所有 API
-	controller.RegisterV1Routes(router, alertService)
+	controller.RegisterV1Routes(router, alertService, keycloak)
 
 	return router
 }

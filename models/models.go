@@ -4,6 +4,7 @@ import (
 	"github.com/detect-viz/shared-lib/models/alert"
 	"github.com/detect-viz/shared-lib/models/common"
 	"github.com/detect-viz/shared-lib/models/config"
+	"github.com/detect-viz/shared-lib/models/dto"
 	"github.com/detect-viz/shared-lib/models/label"
 	"github.com/detect-viz/shared-lib/models/mute"
 
@@ -16,34 +17,29 @@ import (
 
 // 統一對外暴露所有 model
 type (
-	// Alert 相關
-	Rule                 = alert.Rule
-	AlertRuleDetail      = alert.AlertRuleDetail
-	AlertState           = alert.AlertState
-	Contact              = alert.Contact
-	Template             = alert.Template
-	AlertMessage         = alert.AlertMessage
-	AlertMessageTemplate = alert.AlertMessageTemplate
-	CheckRule            = alert.CheckRule
-	TriggerLog           = alert.TriggerLog
-	NotifyLog            = alert.NotifyLog
-	NotifyTriggerLog     = alert.NotifyTriggerLog
-	AlertRuleContact     = alert.AlertRuleContact
-	JSONMap              = alert.JSONMap
-	CurrentAlert         = alert.CurrentAlert
-	HistoryAlert         = alert.HistoryAlert
-	RuleConfig           = alert.RuleConfig
-	AlertContactSeverity = alert.AlertContactSeverity
-	ContactDefinition    = alert.ContactDefinition
-	ContactConfig        = alert.ContactConfig
-	RuleDefinition       = alert.RuleDefinition
-	ThresholdConfig      = alert.ThresholdConfig
-	AlertRuleLabel       = alert.AlertRuleLabel
+	// DTO 相關
+	LabelDTO = dto.LabelDTO
 
-	// Mute 相關
-	Mute              = mute.Mute
-	TimeRange         = mute.TimeRange
-	MuteResourceGroup = mute.MuteResourceGroup
+	// Alert 相關
+	Rule                = alert.Rule
+	Target              = alert.Target
+	MetricRule          = alert.MetricRule
+	Template            = alert.Template
+	MetricRuleOverview  = alert.MetricRuleOverview
+	RuleOverview        = alert.RuleOverview
+	RuleResponse        = alert.RuleResponse
+	RuleContactResponse = alert.RuleContactResponse
+	ContactResponse     = alert.ContactResponse
+	RuleState           = alert.RuleState
+	Contact             = alert.Contact
+	RuleContact         = alert.RuleContact
+	TriggeredLog        = alert.TriggeredLog
+	NotifyLog           = alert.NotifyLog
+
+	//* Alert Input Schema
+	AlertPayload = alert.AlertPayload
+	Metadata     = alert.Metadata
+	MetricValue  = alert.MetricValue
 
 	// Notify 相關
 	EmailSetting  = notifier.EmailSetting
@@ -51,11 +47,11 @@ type (
 	LineConfig    = notifier.LineConfig
 	WebhookConfig = notifier.WebhookConfig
 
-	// Label 相關
-	Label = label.Label
-
 	// Common 相關
-	Common         = common.Common
+	AuditUserModel = common.AuditUserModel
+	AuditTimeModel = common.AuditTimeModel
+	JSONMap        = common.JSONMap
+	SeveritySet    = common.SeveritySet
 	Response       = common.Response
 	OptionResponse = common.OptionResponse
 	MetricResponse = common.MetricResponse
@@ -70,13 +66,6 @@ type (
 	ResourceGroup = resource.ResourceGroup
 	Resource      = resource.Resource
 
-	// Parser 相關
-	FileInfo       = parser.FileInfo
-	MetricValue    = parser.MetricValue
-	Tags           = parser.Tags
-	MetricField    = parser.MetricField
-	MetricLibrarys = parser.MetricLibrarys
-
 	// Config 相關
 	Config         = config.Config
 	GlobalConfig   = config.GlobalConfig
@@ -88,12 +77,12 @@ type (
 	MySQLConfig    = config.MySQLConfig
 	AlertConfig    = config.AlertConfig
 	Code           = config.Code
-	MetricRule     = config.MetricRule
 	KeycloakConfig = config.KeycloakConfig
+
 	// Template 相關
 	TemplateData      = template.TemplateData
 	ResourceGroupInfo = template.ResourceGroupInfo
-	TriggerInfo       = template.TriggerInfo
+	TriggeredInfo     = template.TriggeredInfo
 	DefaultTemplate   = template.DefaultTemplate
 
 	// Scheduler 相關
@@ -101,4 +90,21 @@ type (
 
 	// Logger 相關
 
+	// Parser 相關
+	FileInfo = parser.FileInfo
+	//MetricValue    = parser.MetricValue
+	Tags           = parser.Tags
+	MetricField    = parser.MetricField
+	MetricLibrarys = parser.MetricLibrarys
+
+	// Label 相關
+	LabelKey   = label.LabelKey
+	LabelValue = label.LabelValue
+
+	// Mute 相關
+	Mute              = mute.Mute
+	TimeRange         = mute.TimeRange
+	MuteResourceGroup = mute.MuteResourceGroup
+
+	//RuleLabelValue       = alert.RuleLabelValue
 )

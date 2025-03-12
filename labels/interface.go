@@ -1,20 +1,22 @@
 package labels
 
 import (
+	"mime/multipart"
+
 	"github.com/detect-viz/shared-lib/models"
 )
 
 type Service interface {
 	// 基本 CRUD
-	Create(realm string, label *models.Label) (*models.Label, error)
-	Get(realm, key string) (*models.Label, error)
-	List(realm string, limit, offset int) ([]models.Label, error)
-	Update(realm, key string, updates map[string]interface{}) error
-	UpdateKey(realm, oldKey, newKey string) error
-	Delete(realm, key string) error
-	Exists(realm, key string) (bool, error)
+	Create(realm string, label *models.LabelDTO) (*models.LabelDTO, error)
+	Get(id int64) (*models.LabelDTO, error)
+	List(realm string, cursor int64, limit int) ([]models.LabelDTO, int64, error)
+	Update(realm string, label *models.LabelDTO) (*models.LabelDTO, error)
+	UpdateKeyName(realm string, oldKey, newKey string) (*models.LabelDTO, error)
+	Delete(id int64) error
 
 	// 進階功能
-	GetKeyOptions(realm, key string) ([]models.OptionResponse, error)
-	BulkCreateOrUpdate(realm string, labels []models.Label) ([]models.Label, error)
+	GetKeyOptions(realm string) ([]models.OptionResponse, error)
+	ExportCSV(realm string) ([][]string, error)
+	ImportCSV(realm string, file *multipart.FileHeader) error
 }

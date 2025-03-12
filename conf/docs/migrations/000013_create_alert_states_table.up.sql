@@ -1,0 +1,26 @@
+CREATE TABLE `rule_states` (
+  `rule_detail_id` VARCHAR(36) NOT NULL,
+  `silence_start` bigint DEFAULT NULL,
+  `silence_end` bigint DEFAULT NULL,
+  `mute_start` bigint DEFAULT NULL,
+  `mute_end` bigint DEFAULT NULL,
+  `contact_counter` int DEFAULT '0',
+  `last_alert_severity` varchar(10) DEFAULT NULL,
+  `rule_state` enum('alerting','resolved','normal','disabled') NOT NULL,
+  `contact_state` enum('normal','muting','silence') NOT NULL,
+  `notify_state` enum('solved','failed') NOT NULL,
+  `first_triggered_time` bigint DEFAULT NULL,
+  `last_triggered_time` bigint DEFAULT NULL,
+  `last_check_value` decimal(10,2) DEFAULT '0.00',
+  `last_triggered_value` decimal(10,2) DEFAULT '0.00',
+  `amplitude` decimal(10,2) DEFAULT '0.00',
+  `created_at` bigint unsigned DEFAULT NULL,
+  `updated_at` bigint unsigned DEFAULT NULL,
+  FOREIGN KEY (`rule_detail_id`) REFERENCES `rule_details` (`id`),
+  UNIQUE KEY `idx_alert_state` (`rule_detail_id`),
+  KEY `idx_start_time` (`silence_start`),
+  KEY `idx_end_time` (`silence_end`),
+  KEY `idx_mute_start` (`mute_start`),
+  KEY `idx_mute_end` (`mute_end`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+

@@ -50,4 +50,7 @@ type KeycloakClient interface {
 	// 關聯操作
 	RemoveUserFromRole(ctx context.Context, userID string, roleName string) error
 	RemoveUserFromGroup(ctx context.Context, userID string, groupID string) error
+
+	// 獲取 Realm 的屬性
+	GetRealmAttribute(ctx context.Context, attrKey string) (string, error)
 }

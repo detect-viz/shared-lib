@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,12 +43,8 @@ type Service struct {
 	config           models.AlertConfig
 	global           models.GlobalConfig
 	globalRules      map[string]map[string]map[string][]models.Rule
-	metricRules      map[string][]models.MetricRule
 	logger           logger.Logger
 	mysql            *mysql.Client
-	// keycloak         *keycloak.Client
-	// muteService      mutes.Service
-	// labelService     labels.Service
 }
 
 func (s *Service) GetRuleService() rules.Service {
@@ -103,25 +100,22 @@ func NewService(
 		logSvc.Error("註冊通知任務失敗", zap.Error(err))
 	}
 
+	// 載入告警遷移
+	alertService.mysql.LoadAlertMigrate(config.MigratePath)
+
 	// 載入所有規則
 	alertService.globalRules = alertService.getGlobalRules()
 
 	// 啟動定期重新載入任務
 	alertService.scheduleRulesReload()
 
-	// 載入 metricRules
-	alertService.metricRules = alertService.getMetricRules()
+	// 設置規則變更回調
+	rule.SetRuleChangeCallback(alertService.updateGlobalRules)
+
+	// 設置聯絡人變更回調
+	contact.SetContactChangeCallback(alertService.updateGlobalContacts)
 
 	return alertService
-}
-
-// * 獲取所有 MetricRule 用 UID 作為 key
-func (s *Service) getMetricRules() map[string][]models.MetricRule {
-	metricRules := make(map[string][]models.MetricRule)
-	for _, rule := range s.global.MetricRules {
-		metricRules[rule.Category] = append(metricRules[rule.Category], rule)
-	}
-	return metricRules
 }
 
 // AutoApply 自動匹配監控對象和告警規則，並返回匹配的規則列表
@@ -129,13 +123,13 @@ func (s *Service) AutoApply(payload models.AlertPayload) ([]models.Rule, error) 
 	s.logger.Debug("自動匹配監控對象&告警規則",
 		zap.String("realm", payload.Metadata.RealmName),
 		zap.String("resource", payload.Metadata.ResourceName),
-		zap.String("datasource", payload.Metadata.DataSource))
+		zap.String("datasource", payload.Metadata.DataSourceType))
 
 	// 用於存儲匹配的規則
 	var matchedRules []models.Rule
 
 	// 檢查每個 metric 的 partition
-	for metricKey := range payload.Data.Metrics {
+	for metricKey := range payload.Data {
 		// 解析 metricKey 獲取 partition
 		parts := strings.Split(metricKey, ":")
 		if len(parts) < 2 {
@@ -150,7 +144,7 @@ func (s *Service) AutoApply(payload models.AlertPayload) ([]models.Rule, error) 
 		// 檢查 target 是否存在
 		exists, err := s.mysql.CheckTargetExists(
 			payload.Metadata.RealmName,
-			payload.Metadata.DataSource,
+			payload.Metadata.DataSourceType,
 			payload.Metadata.ResourceName,
 			partitionName,
 		)
@@ -182,9 +176,7 @@ func (s *Service) AutoApply(payload models.AlertPayload) ([]models.Rule, error) 
 					zap.String("partition", partitionName))
 			} else if len(targetRules) > 0 {
 				// 將找到的規則添加到匹配規則列表中
-				for _, rule := range targetRules {
-					matchedRules = append(matchedRules, rule)
-				}
+				matchedRules = append(matchedRules, targetRules...)
 			}
 			continue
 		}
@@ -192,16 +184,16 @@ func (s *Service) AutoApply(payload models.AlertPayload) ([]models.Rule, error) 
 		// 如果 target 不存在，則創建
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 
-			category := s.getMetricCategory(payload.Metadata.DataSource, metricName)
+			category := s.getMetricCategory(payload.Metadata.DataSourceType, metricName)
 
 			var collection_interval int
-			if len(payload.Data.Metrics[metricKey]) > 2 {
-				collection_interval = int(payload.Data.Metrics[metricKey][0].Timestamp - payload.Data.Metrics[metricKey][1].Timestamp)
+			if len(payload.Data[metricKey]) > 2 {
+				collection_interval = int(payload.Data[metricKey][0].Timestamp - payload.Data[metricKey][1].Timestamp)
 			}
 
 			var reporting_interval int
-			if len(payload.Data.Metrics[metricKey]) > 2 {
-				reporting_interval = int(payload.Data.Metrics[metricKey][0].Timestamp - payload.Data.Metrics[metricKey][len(payload.Data.Metrics[metricKey])-1].Timestamp)
+			if len(payload.Data[metricKey]) > 2 {
+				reporting_interval = int(payload.Data[metricKey][0].Timestamp - payload.Data[metricKey][len(payload.Data[metricKey])-1].Timestamp)
 			}
 
 			s.logger.Info("自動創建 target",
@@ -209,14 +201,14 @@ func (s *Service) AutoApply(payload models.AlertPayload) ([]models.Rule, error) 
 				zap.String("resource", payload.Metadata.ResourceName),
 				zap.String("partition", partitionName),
 				zap.String("metric", metricName),
-				zap.String("datasource", payload.Metadata.DataSource))
+				zap.String("datasource", payload.Metadata.DataSourceType))
 
 			// 創建新的 target
 			newTarget := models.Target{
 				RealmName:          payload.Metadata.RealmName,
 				ResourceName:       payload.Metadata.ResourceName,
 				PartitionName:      partitionName,
-				DatasourceName:     payload.Metadata.DataSource,
+				DatasourceName:     payload.Metadata.DataSourceType,
 				CollectionInterval: collection_interval,
 				ReportingInterval:  reporting_interval,
 			}
@@ -242,7 +234,7 @@ func (s *Service) AutoApply(payload models.AlertPayload) ([]models.Rule, error) 
 
 			// 自動匹配告警規則
 			var createdRules []models.Rule
-			autoApplyRules := s.matchAutoApplyRule(payload.Metadata.RealmName, payload.Metadata.DataSource, metricName)
+			autoApplyRules := s.matchAutoApplyRule(payload.Metadata.RealmName, payload.Metadata.DataSourceType, metricName)
 			if autoApplyRules != nil {
 
 				for _, rule := range *autoApplyRules {
@@ -374,7 +366,7 @@ func (s *Service) matchRulesFromGlobalRules(payload models.AlertPayload) []model
 
 	// 2. 為每個 payload 中的 metric 找到匹配的規則
 	metricKeyMap := make(map[string]bool)
-	for metricKey := range payload.Data.Metrics {
+	for metricKey := range payload.Data {
 		metricKeyMap[metricKey] = true
 	}
 
@@ -386,16 +378,11 @@ func (s *Service) matchRulesFromGlobalRules(payload models.AlertPayload) []model
 
 		// 獲取對應的 MetricRule
 		var metricRule models.MetricRule
-		for _, ruleSet := range s.metricRules {
-			for _, r := range ruleSet {
-				if r.UID == metricRuleUID {
-					metricRule = r
-					break
-				}
-			}
-			if metricRule.UID != "" {
-				break
-			}
+		metricRule, exists := s.global.MetricRules[metricRuleUID]
+		if !exists {
+			s.logger.Error("找不到對應的 MetricRule",
+				zap.String("metric_rule_uid", metricRuleUID))
+			continue
 		}
 
 		if metricRule.UID == "" {
@@ -479,6 +466,21 @@ func (s *Service) updateGlobalRules(rule models.Rule, operation string) {
 			}
 		}
 	}
+}
+
+// 在 Contact CRUD 操作後處理聯絡人變更
+func (s *Service) updateGlobalContacts(contact models.Contact, operation string) {
+	s.logger.Info("聯絡人變更",
+		zap.String("contact_id", string(contact.ID)),
+		zap.String("operation", operation))
+
+	// 聯絡人變更後，重新載入所有規則
+	// 這是因為聯絡人變更可能影響多個規則的通知設定
+	globalRulesMutex.Lock()
+	s.globalRules = s.getGlobalRules()
+	globalRulesMutex.Unlock()
+
+	s.logger.Info("已重新載入所有規則（由聯絡人變更觸發）")
 }
 
 // 註冊批次通知任務
@@ -567,21 +569,9 @@ func (s *Service) ProcessAlert(payload models.AlertPayload) error {
 	for _, rule := range rules {
 		// 獲取對應的 MetricRule
 		var metricRule models.MetricRule
-		for _, rules := range s.metricRules {
-			for _, r := range rules {
-				if r.UID == rule.MetricRuleUID {
-					metricRule = r
-					break
-				}
-			}
-			if metricRule.UID != "" {
-				break
-			}
-		}
-
-		if metricRule.UID == "" {
-			s.logger.Error("找不到對應的 metric rule",
-				zap.String("rule_id", string(rule.ID)),
+		metricRule, exists := s.global.MetricRules[rule.MetricRuleUID]
+		if !exists {
+			s.logger.Error("找不到對應的 MetricRule",
 				zap.String("metric_rule_uid", rule.MetricRuleUID))
 			continue
 		}
@@ -597,7 +587,7 @@ func (s *Service) ProcessAlert(payload models.AlertPayload) error {
 			metricKey = metricKey + ":" + rule.Target.PartitionName
 		}
 
-		metricValues, ok := payload.Data.Metrics[metricKey]
+		metricValues, ok := payload.Data[metricKey]
 		if !ok {
 			s.logger.Debug("找不到對應的 metric 數據",
 				zap.String("metric_key", metricKey))
@@ -607,10 +597,7 @@ func (s *Service) ProcessAlert(payload models.AlertPayload) error {
 		// 將 MetricValue 轉換為 MetricPoint
 		var metricData []models.MetricValue
 		for _, mv := range metricValues {
-			metricData = append(metricData, models.MetricValue{
-				Timestamp: mv.Timestamp,
-				Value:     mv.Value,
-			})
+			metricData = append(metricData, models.MetricValue(mv))
 		}
 
 		// 4. 檢查告警邏輯
@@ -652,53 +639,12 @@ func (s *Service) ProcessAlert(payload models.AlertPayload) error {
 	return nil
 }
 
-// 檢查閾值並返回嚴重程度
-func (s *Service) checkThreshold(rule models.Rule, operator string, value float64) (bool, string, *float64) {
-
-	var severity string
-
-	switch strings.ToLower(operator) {
-	case "gt":
-		if rule.CritThreshold != 0 && value > rule.CritThreshold {
-			return true, s.global.Code.Severity.Crit.Name, &rule.CritThreshold
-		}
-		if rule.WarnThreshold != nil && value > *rule.WarnThreshold {
-			return true, s.global.Code.Severity.Warn.Name, rule.WarnThreshold
-		}
-		if rule.InfoThreshold != nil && value > *rule.InfoThreshold {
-			return true, s.global.Code.Severity.Info.Name, rule.InfoThreshold
-		}
-	case "lt":
-		if rule.CritThreshold != 0 && value < rule.CritThreshold {
-			return true, s.global.Code.Severity.Crit.Name, &rule.CritThreshold
-		}
-		if rule.WarnThreshold != nil && value < *rule.WarnThreshold {
-			return true, s.global.Code.Severity.Warn.Name, rule.WarnThreshold
-		}
-		if rule.InfoThreshold != nil && value < *rule.InfoThreshold {
-			return true, s.global.Code.Severity.Info.Name, rule.InfoThreshold
-		}
-	}
-	return false, severity, nil
-}
-
 // CheckSingle 檢查單個規則是否觸發告警
 func (s *Service) CheckSingle(rule *models.Rule, metricData []models.MetricValue, currentTime int64) (bool, float64, string) {
 	// 獲取對應的 MetricRule
 	var metricRule models.MetricRule
-	for _, rules := range s.metricRules {
-		for _, r := range rules {
-			if r.UID == rule.MetricRuleUID {
-				metricRule = r
-				break
-			}
-		}
-		if metricRule.UID != "" {
-			break
-		}
-	}
-
-	if metricRule.UID == "" {
+	metricRule, exists := s.global.MetricRules[rule.MetricRuleUID]
+	if !exists {
 		s.logger.Error("找不到對應的 MetricRule",
 			zap.String("metric_rule_uid", rule.MetricRuleUID))
 		return false, 0, ""
@@ -932,7 +878,7 @@ func (s *Service) CheckPayload(payload models.AlertPayload) error {
 	if payload.Metadata.RealmName == "" {
 		return fmt.Errorf("realm_name 不能為空")
 	}
-	if payload.Metadata.DataSource == "" {
+	if payload.Metadata.DataSourceType == "" {
 		return fmt.Errorf("datasource_type 不能為空")
 	}
 	if payload.Metadata.ResourceName == "" {
@@ -943,26 +889,33 @@ func (s *Service) CheckPayload(payload models.AlertPayload) error {
 	}
 
 	// 檢查 data 是否有數據
-	if len(payload.Data.Metrics) == 0 {
+	if len(payload.Data) == 0 {
 		return fmt.Errorf("metrics 不能為空")
 	}
 
 	// 檢查每個 metric 的數據格式
-	for metricKey, metricData := range payload.Data.Metrics {
+	for metricKey, metricData := range payload.Data {
 		if len(metricData) == 0 {
 			return fmt.Errorf("metric %s 的數據不能為空", metricKey)
 		}
 
-		// 檢查 metric key 格式是否正確 (metric_name:partition_name)
-		parts := strings.Split(metricKey, ":")
-		if len(parts) < 2 {
-			return fmt.Errorf("metric key %s 格式不正確，應為 metric_name:partition_name", metricKey)
+		// 不再嚴格檢查 metric key 格式，允許更靈活的格式
+		// 只要確保 metric key 不為空即可
+		if metricKey == "" {
+			return fmt.Errorf("metric key 不能為空")
 		}
 
-		// 檢查每個數據點是否有 timestamp 和 value
+		// 檢查每個數據點是否有 timestamp 和 value，並且確保它們是數字而不是字符串
 		for i, point := range metricData {
 			if point.Timestamp == 0 {
-				return fmt.Errorf("metric %s 的第 %d 個數據點缺少 timestamp", metricKey, i)
+				return fmt.Errorf("metric %s 的第 %d 個數據點缺少 timestamp 或 timestamp 不是數字", metricKey, i)
+			}
+
+			// 檢查 value 是否為有效的數字
+			// 由於 Go 的類型系統，如果 Value 是 float64 類型，這裡不需要額外檢查
+			// 但我們可以檢查是否為 NaN 或 Infinity
+			if math.IsNaN(point.Value) || math.IsInf(point.Value, 0) {
+				return fmt.Errorf("metric %s 的第 %d 個數據點的 value 不是有效的數字", metricKey, i)
 			}
 		}
 	}

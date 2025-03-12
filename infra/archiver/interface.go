@@ -5,7 +5,7 @@ import (
 )
 
 // 誌輪轉器接口
-type ArchiverService interface {
+type Service interface {
 	// 註冊輪轉任務
 	RegisterRotateTask(task common.RotateTask) error
 	// 執行輪轉任務

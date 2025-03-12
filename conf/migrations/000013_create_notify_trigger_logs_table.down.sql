@@ -1,1 +1,0 @@
-DROP TABLE IF EXISTS `notify_trigger_logs`;

@@ -5,7 +5,7 @@ import (
 )
 
 // Scheduler 排程器介面
-type Scheduler interface {
+type Service interface {
 	// 註冊任務
 	RegisterTask(job common.Task) error
 	// 啟動排程器

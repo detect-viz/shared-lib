@@ -1,30 +1,67 @@
 package controller
 
 import (
+	"context"
+	"net/http"
 	"strconv"
 
 	"github.com/detect-viz/shared-lib/api/response"
+	"github.com/detect-viz/shared-lib/apierrors"
 	"github.com/detect-viz/shared-lib/models"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // @Summary 獲取聯絡人列表
-// @Description 取得所有聯絡人
+// @Description 取得所有聯絡人 [ID, Name, Type, Enabled]
 // @Tags Contact
 // @Accept json
 // @Produce json
-// @Success 200 {array} models.Contact "成功回應"
-// @Failure 500 {object} response.ErrorResponse "伺服器錯誤"
+// @Param cursor query int false "created_at"
+// @Param limit query int false "最大筆數"
+// @Success 200 {object} response.Response "成功回應"
+// @Failure 400 {object} response.Response "無效的 ID"
+// @Failure 500 {object} response.Response "伺服器錯誤"
 // @Security ApiKeyAuth
 // @Router /alert/contact [get]
 func (a *AlertAPI) ListContacts(c *gin.Context) {
 	user := c.Keys["user"].(models.SSOUser)
-	contacts, err := a.contactService.List(user.Realm)
+	cursor := int64(0) // 預設從 0 開始
+	limit := 10        // 預設取 10 筆
+	var err error
+
+	if c.Query("cursor") != "" {
+		cursor, err = strconv.ParseInt(c.Query("cursor"), 10, 64)
+		if err != nil || cursor < 0 {
+			response.JSONError(c, 400, apierrors.ErrInvalidID)
+			return
+		}
+	}
+
+	if c.Query("limit") != "" {
+		limit, err = strconv.Atoi(c.Query("limit"))
+		if err != nil {
+			response.JSONError(c, 400, apierrors.ErrInvalidID)
+			return
+		}
+	}
+
+	contacts, nextCursor, err := a.contactService.List(user.Realm, cursor, limit)
 	if err != nil {
 		response.JSONError(c, 500, err)
 		return
 	}
-	response.JSONSuccess(c, contacts)
+
+	// 將 Contact 轉換為 ContactResponse
+	contactResponses := make([]models.ContactResponse, len(contacts))
+	for i, contact := range contacts {
+		contactResponses[i] = a.contactService.ToResponse(contact)
+	}
+
+	response.JSONResponse(c, 200, gin.H{
+		"contacts":    contactResponses,
+		"next_cursor": nextCursor,
+	}, "success")
 }
 
 // @Summary 獲取單一聯絡人
@@ -33,24 +70,39 @@ func (a *AlertAPI) ListContacts(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Param id path int true "聯絡人 ID"
-// @Success 200 {object} models.Contact "成功回應"
-// @Failure 400 {object} response.ErrorResponse "無效的 ID"
-// @Failure 500 {object} response.ErrorResponse "伺服器錯誤"
+// @Success 200 {object} models.ContactResponse "成功回應"
+// @Failure 400 {object} response.Response "無效的 ID"
+// @Failure 500 {object} response.Response "伺服器錯誤"
 // @Security ApiKeyAuth
 // @Router /alert/contact/{id} [get]
 func (a *AlertAPI) GetContact(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		response.JSONError(c, 400, response.ErrInvalidID)
+	idStr := c.Param("id")
+	if idStr == "" {
+		response.JSONError(c, 400, apierrors.ErrInvalidID)
 		return
 	}
 
-	contact, err := a.contactService.Get(id)
+	// 將 ID 轉換為 []byte
+	id, err := uuid.Parse(idStr)
 	if err != nil {
-		response.JSONError(c, 500, err)
+		response.JSONError(c, 400, apierrors.ErrInvalidID)
 		return
 	}
-	response.JSONSuccess(c, contact)
+
+	contact, err := a.contactService.Get(id[:])
+	if err != nil {
+		if apiErr, ok := err.(*apierrors.APIError); ok {
+			response.JSONError(c, apiErr.Code, apiErr)
+		} else {
+			response.JSONError(c, 500, apierrors.ErrInternalError)
+		}
+		return
+	}
+
+	// 將 Contact 轉換為 ContactResponse
+	contactResponse := a.contactService.ToResponse(*contact)
+
+	response.JSONSuccess(c, contactResponse)
 }
 
 // @Summary 創建聯絡人
@@ -58,25 +110,32 @@ func (a *AlertAPI) GetContact(c *gin.Context) {
 // @Tags Contact
 // @Accept json
 // @Produce json
-// @Param contact body models.Contact true "聯絡人內容"
-// @Success 201 {object} models.Contact "成功創建"
-// @Failure 400 {object} response.ErrorResponse "請求內容無效"
-// @Failure 500 {object} response.ErrorResponse "伺服器錯誤"
+// @Param contact body models.ContactResponse true "聯絡人內容"
+// @Success 201 {object} models.ContactResponse "成功創建"
+// @Failure 400 {object} response.Response "請求內容無效"
+// @Failure 500 {object} response.Response "伺服器錯誤"
 // @Security ApiKeyAuth
 // @Router /alert/contact [post]
 func (a *AlertAPI) CreateContact(c *gin.Context) {
-	var contact models.Contact
-	if err := c.ShouldBindJSON(&contact); err != nil {
-		response.JSONError(c, 400, response.ErrInvalidPayload)
+	var contactResp models.ContactResponse
+	if err := c.ShouldBindJSON(&contactResp); err != nil {
+		response.JSONError(c, 400, apierrors.ErrInvalidPayload)
 		return
 	}
 
-	err := a.contactService.Create(&contact)
+	// 將 ContactResponse 轉換為 Contact
+	contact := a.contactService.FromResponse(contactResp)
+
+	newContact, err := a.contactService.Create(&contact)
 	if err != nil {
 		response.JSONError(c, 500, err)
 		return
 	}
-	response.JSONCreated(c, contact)
+
+	// 將 Contact 轉換為 ContactResponse
+	contactResponse := a.contactService.ToResponse(*newContact)
+
+	response.JSONCreated(c, contactResponse)
 }
 
 // @Summary 更新聯絡人
@@ -85,25 +144,52 @@ func (a *AlertAPI) CreateContact(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Param id path int true "聯絡人 ID"
-// @Param contact body models.Contact true "聯絡人內容"
-// @Success 200 {object} models.Contact "成功更新"
-// @Failure 400 {object} response.ErrorResponse "請求內容無效"
-// @Failure 500 {object} response.ErrorResponse "伺服器錯誤"
+// @Param contact body models.ContactResponse true "聯絡人內容"
+// @Success 200 {object} models.ContactResponse "成功更新"
+// @Failure 400 {object} response.Response "請求內容無效"
+// @Failure 500 {object} response.Response "伺服器錯誤"
 // @Security ApiKeyAuth
 // @Router /alert/contact/{id} [put]
 func (a *AlertAPI) UpdateContact(c *gin.Context) {
-	var contact models.Contact
-	if err := c.ShouldBindJSON(&contact); err != nil {
-		response.JSONError(c, 400, response.ErrInvalidPayload)
+	idStr := c.Param("id")
+	if idStr == "" {
+		response.JSONError(c, 400, apierrors.ErrInvalidID)
 		return
 	}
 
-	err := a.contactService.Update(&contact)
+	// 將 ID 轉換為 []byte
+	id, err := uuid.Parse(idStr)
 	if err != nil {
-		response.JSONError(c, 500, err)
+		response.JSONError(c, 400, apierrors.ErrInvalidID)
 		return
 	}
-	response.JSONSuccess(c, contact)
+
+	var contactResp models.ContactResponse
+	if err := c.ShouldBindJSON(&contactResp); err != nil {
+		response.JSONError(c, 400, apierrors.ErrInvalidPayload)
+		return
+	}
+
+	// 將 ContactResponse 轉換為 Contact
+	contact := a.contactService.FromResponse(contactResp)
+
+	// 確保 contact.ID 來自 path
+	contact.ID = id[:]
+
+	updatedContact, err := a.contactService.Update(&contact)
+	if err != nil {
+		if apiErr, ok := err.(*apierrors.APIError); ok {
+			response.JSONError(c, apiErr.Code, apiErr)
+		} else {
+			response.JSONError(c, 500, apierrors.ErrInternalError)
+		}
+		return
+	}
+
+	// 將 Contact 轉換為 ContactResponse
+	contactResponse := a.contactService.ToResponse(*updatedContact)
+
+	response.JSONSuccess(c, contactResponse)
 }
 
 // @Summary 刪除聯絡人
@@ -113,21 +199,106 @@ func (a *AlertAPI) UpdateContact(c *gin.Context) {
 // @Produce json
 // @Param id path int true "聯絡人 ID"
 // @Success 200 {object} map[string]string "刪除成功"
-// @Failure 400 {object} response.ErrorResponse "無效的 ID"
-// @Failure 500 {object} response.ErrorResponse "伺服器錯誤"
+// @Failure 400 {object} response.Response "無效的 ID"
+// @Failure 500 {object} response.Response "伺服器錯誤"
 // @Security ApiKeyAuth
 // @Router /alert/contact/{id} [delete]
 func (a *AlertAPI) DeleteContact(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		response.JSONError(c, 400, response.ErrInvalidID)
+	idStr := c.Param("id")
+	if idStr == "" {
+		response.JSONError(c, 400, apierrors.ErrInvalidID)
 		return
 	}
 
-	err = a.contactService.Delete(id)
+	// 將 ID 轉換為 []byte
+	id, err := uuid.Parse(idStr)
 	if err != nil {
-		response.JSONError(c, 500, err)
+		response.JSONError(c, 400, apierrors.ErrInvalidID)
 		return
 	}
+
+	err = a.contactService.Delete(id[:])
+	if err != nil {
+		if apiErr, ok := err.(*apierrors.APIError); ok {
+			response.JSONError(c, apiErr.Code, apiErr)
+		} else {
+			response.JSONError(c, 500, apierrors.ErrInternalError)
+		}
+		return
+	}
+
 	response.JSONSuccess(c, gin.H{"message": "刪除成功"})
+}
+
+// @Summary 測試聯絡人
+// @Description 測試聯絡人是否能夠收到通知
+// @Tags Contact
+// @Accept json
+// @Produce json
+// @Param contact body models.ContactResponse true "聯絡人內容"
+// @Success 200 {object} models.Response "成功回應"
+// @Failure 400 {object} response.Response "請求內容無效"
+// @Failure 500 {object} response.Response "伺服器錯誤"
+// @Security ApiKeyAuth
+// @Router /alert/contact/test [post]
+func (a *AlertAPI) TestContact(c *gin.Context) {
+	var contactResp models.ContactResponse
+	if err := c.ShouldBindJSON(&contactResp); err != nil {
+		response.JSONError(c, 400, apierrors.ErrInvalidPayload)
+		return
+	}
+
+	// 將 ContactResponse 轉換為 Contact
+	contact := a.contactService.FromResponse(contactResp)
+
+	// 確保 Config 存在
+	if contact.Config == nil {
+		response.JSONError(c, 400, apierrors.ErrInvalidPayload)
+		return
+	}
+
+	err := a.contactService.NotifyTest(contact)
+	if err != nil {
+		if apiErr, ok := err.(*apierrors.APIError); ok {
+			response.JSONError(c, apiErr.Code, apiErr)
+		} else {
+			response.JSONError(c, 500, apierrors.ErrInternalError)
+		}
+		return
+	}
+
+	response.JSONSuccess(c, gin.H{"message": "測試成功"})
+}
+
+// @Summary 獲取通知方法
+// @Description 取得所有通知方法
+// @Tags Contact
+// @Accept json
+// @Produce json
+// @Success 200 {array} string "成功回應"
+// @Failure 500 {object} response.Response "伺服器錯誤"
+// @Security ApiKeyAuth
+// @Router /alert/contact/notify-methods [get]
+func (a *AlertAPI) GetNotifyMethods(c *gin.Context) {
+	methods := a.contactService.GetNotifyMethods()
+	response.JSONSuccess(c, methods)
+}
+
+// @Summary 獲取通知選項
+// @Description 取得所有通知選項
+// @Tags Contact
+// @Accept json
+// @Produce json
+// @Success 200 {array} string "成功回應"
+// @Failure 500 {object} response.Response "伺服器錯誤"
+// @Security ApiKeyAuth
+// @Router /alert/contact/notify-options [get]
+func (a *AlertAPI) GetNotifyOptions(c *gin.Context) {
+	user := c.Keys["user"].(models.SSOUser)
+	options, err := a.contactService.GetNotifyOptions(context.Background(), user.Realm)
+	if err != nil {
+		response.JSONError(c, http.StatusInternalServerError, err)
+		return
+	}
+	response.JSONSuccess(c, options)
 }

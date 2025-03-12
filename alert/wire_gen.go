@@ -14,7 +14,6 @@ import (
 	"github.com/detect-viz/shared-lib/labels"
 	"github.com/detect-viz/shared-lib/models"
 	"github.com/detect-viz/shared-lib/models/config"
-	"github.com/detect-viz/shared-lib/mutes"
 	"github.com/detect-viz/shared-lib/notifier"
 	"github.com/detect-viz/shared-lib/rules"
 	"github.com/detect-viz/shared-lib/storage/mysql"
@@ -26,56 +25,107 @@ import (
 // Injectors from wire.go:
 
 // InitializeAlertService 初始化 AlertService
-func InitializeAlertService(config2 config.AlertConfig, global config.GlobalConfig, mysqlClient *mysql.Client, log logger.Logger, keycloak2 *keycloak.Client) (*Service, error) {
-	zapLogger := ProvideZapLogger(log)
-	serviceImpl := rules.NewService(mysqlClient, zapLogger)
-	mutesServiceImpl := mutes.NewService(mysqlClient, zapLogger)
-	notifierServiceImpl := notifier.NewService()
-	contactsServiceImpl := contacts.NewService(mysqlClient, log, notifierServiceImpl)
-	service := scheduler.NewService(log)
+func InitializeAlertService(config2 config.AlertConfig, global config.GlobalConfig, mysqlClient *mysql.Client, log logger.Logger, keycloakClient *keycloak.Client) (*Service, error) {
+	globalConfig := ProvideGlobalConfig(global)
+	serviceImpl := rules.NewService(mysqlClient, log, globalConfig)
+	service := ProvideNotifierService(keycloakClient)
+	contactsServiceImpl := contacts.NewService(mysqlClient, log, service, keycloakClient)
+	schedulerServiceImpl := scheduler.NewService(log)
 	templatesServiceImpl := templates.NewService(log)
-	labelsServiceImpl := labels.NewService(mysqlClient)
-	alertService := ProvideAlertService(config2, global, log, mysqlClient, serviceImpl, mutesServiceImpl, keycloak2, notifierServiceImpl, contactsServiceImpl, service, templatesServiceImpl, labelsServiceImpl)
+	alertService := ProvideAlertService(config2, global, mysqlClient, log, serviceImpl, service, contactsServiceImpl, schedulerServiceImpl, templatesServiceImpl)
 	return alertService, nil
 }
 
 // wire.go:
 
-// ProvideZapLogger 提供 zap.Logger
+// 提供 zap.Logger
 func ProvideZapLogger(log logger.Logger) *zap.Logger {
+	if log == nil {
+		panic("❌ log 是 nil")
+	}
 	return log.GetLogger()
+}
+
+// 提供 GlobalConfig
+func ProvideGlobalConfig(global models.GlobalConfig) *models.GlobalConfig {
+	return &global
+}
+
+// 提供 notifier.Service
+func ProvideNotifierService(keycloakClient *keycloak.Client) notifier.Service {
+	return notifier.NewService(keycloakClient)
+}
+
+// 提供 scheduler.Service
+func ProvideSchedulerService(log logger.Logger) scheduler.Service {
+	return scheduler.NewService(log)
+}
+
+// 提供 templates.Service
+func ProvideTemplateService(log logger.Logger) templates.Service {
+	return templates.NewService(log)
+}
+
+// 提供 labels.Service
+func ProvideLabelService(mysqlClient *mysql.Client) labels.Service {
+	return labels.NewService(mysqlClient)
+}
+
+// 提供 contacts.Service
+func ProvideContactService(mysqlClient *mysql.Client, log logger.Logger, notifierService notifier.Service, keycloakClient *keycloak.Client) contacts.Service {
+	return contacts.NewService(mysqlClient, log, notifierService, keycloakClient)
 }
 
 // AlertSet 提供所有依賴的 wire Set
 var AlertSet = wire.NewSet(
 
-	ProvideZapLogger, rules.RuleSet, notifier.NotifySet, scheduler.SchedulerSet, mutes.MuteSet, templates.TemplateSet, contacts.ContactSet, labels.LabelSet, ProvideAlertService,
+	ProvideZapLogger,
+
+	ProvideGlobalConfig,
+
+	ProvideNotifierService,
+
+	ProvideAlertService, rules.RuleSet, scheduler.SchedulerSet, templates.TemplateSet, contacts.ContactSet,
 )
 
 // ProvideAlertService 提供 AlertService 實例
 func ProvideAlertService(config2 models.AlertConfig,
 
 	global models.GlobalConfig,
-	logSvc logger.Logger,
 	mysqlClient *mysql.Client,
-
+	logSvc logger.Logger,
 	rule rules.Service,
-	mute mutes.Service, keycloak2 *keycloak.Client,
-
 	notify notifier.Service,
-	contact contacts.Service, scheduler2 *scheduler.Service,
-	template templates.Service,
+	contact contacts.Service, scheduler2 scheduler.Service,
 
-	label labels.Service,
+	template templates.Service,
 ) *Service {
+	logSvc.Debug("檢查 ProvideAlertService 參數", zap.Any("config", config2), zap.Any("mysqlClient", mysqlClient))
+
+	if mysqlClient == nil {
+		panic("❌ mysqlClient 是 nil")
+	}
+	if logSvc == nil {
+		panic("❌ logSvc 是 nil")
+	}
+	if notify == nil {
+		panic("❌ notify 是 nil")
+	}
+	if contact == nil {
+		panic("❌ contact 是 nil")
+	}
+	if scheduler2 == nil {
+		panic("❌ scheduler 是 nil")
+	}
+	if template == nil {
+		panic("❌ template 是 nil")
+	}
+
 	return NewService(config2, global,
 		mysqlClient,
 		logSvc,
-
 		rule,
-		mute, keycloak2, notify,
+		notify,
 		contact, scheduler2, template,
-
-		label,
 	)
 }

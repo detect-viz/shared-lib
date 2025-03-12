@@ -87,11 +87,6 @@ func (s *serviceImpl) GetMutePeriod(resourceGroupID int64, t time.Time) (int64, 
 	return 0, 0
 }
 
-// CheckName 檢查名稱是否重複
-func (s *serviceImpl) CheckName(mute models.Mute) (bool, string) {
-	return s.mysql.CheckMuteName(mute)
-}
-
 // GetOptions 提供 UI 選項
 func (s *serviceImpl) GetOptions(typ string) []models.OptionResponse {
 	switch typ {

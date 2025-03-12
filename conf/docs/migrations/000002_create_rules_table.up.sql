@@ -1,0 +1,23 @@
+CREATE TABLE `rules` (
+  `realm_name` varchar(20) NOT NULL DEFAULT 'master',
+  `id` VARCHAR(36) NOT NULL,
+  `name` varchar(255) NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `is_joint` tinyint(1) NOT NULL DEFAULT '0',
+  `resource_group_id` bigint NOT NULL,
+  `metric_rule_uid` varchar(36) NOT NULL,
+  `info_threshold` double DEFAULT NULL COMMENT '一般告警閾值',
+  `warn_threshold` double DEFAULT NULL COMMENT '警告告警閾值',
+  `crit_threshold` double DEFAULT NULL COMMENT '嚴重告警閾值',
+  `duration` varchar(10) NOT NULL DEFAULT '5m',
+  `silence_period` varchar(10) NOT NULL DEFAULT '1h',
+  `times` int NOT NULL DEFAULT '3',
+  `created_at` bigint unsigned DEFAULT NULL,
+  `updated_at` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_rule_name` (`realm_name`,`metric_rule_uid`,`resource_group_id`,`name`),
+  KEY `fk_realms_rules` (`realm_name`),
+  KEY `fk_resource_group_rule` (`resource_group_id`),
+  CONSTRAINT `fk_realms_rules` FOREIGN KEY (`realm_name`) REFERENCES `realms` (`name`),
+  CONSTRAINT `fk_resource_group_rule` FOREIGN KEY (`resource_group_id`) REFERENCES `resource_groups` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

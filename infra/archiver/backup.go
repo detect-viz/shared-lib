@@ -6,14 +6,14 @@ import (
 	"github.com/detect-viz/shared-lib/models/common"
 )
 
-// BackupTask 管理備份
-type BackupTask struct {
-	service *Service
+// NewBackupTask 建立 `BackupTask`
+func NewBackupTask(service *ServiceImpl) *BackupTask {
+	return &BackupTask{service: service}
 }
 
-// NewBackupTask 建立 `BackupTask`
-func NewBackupTask(service *Service) *BackupTask {
-	return &BackupTask{service: service}
+// BackupTask 管理備份
+type BackupTask struct {
+	service *ServiceImpl
 }
 
 // Execute 執行備份

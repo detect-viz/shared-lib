@@ -39,15 +39,23 @@ func NewClient(keycloakConfig *models.KeycloakConfig) (KeycloakClient, error) {
 		keycloakConfig: keycloakConfig,
 	}
 
-	// 初始化時進行服務帳戶登入
-	jwt, err := gc.LoginClient(context.Background(), keycloakConfig.ClientID, keycloakConfig.ClientSecret, keycloakConfig.Realm)
-	if err != nil {
-		return nil, fmt.Errorf("login client failed: %v", err)
+	if keycloakConfig.User != "" && keycloakConfig.Password != "" {
+		jwt, err := gc.LoginAdmin(context.Background(), keycloakConfig.User, keycloakConfig.Password, keycloakConfig.Realm)
+		if err != nil {
+			return nil, fmt.Errorf("login admin failed: %v", err)
+		}
+		client.jwt = jwt
+	} else {
+		// 初始化時進行服務帳戶登入
+		jwt, err := gc.LoginClient(context.Background(), keycloakConfig.ClientID, keycloakConfig.ClientSecret, keycloakConfig.Realm)
+		if err != nil {
+			return nil, fmt.Errorf("login client failed: %v", err)
+		}
+		client.jwt = jwt
 	}
-	client.jwt = jwt
 
 	// 獲取客戶端UUID
-	clients, err := gc.GetClients(context.Background(), jwt.AccessToken, keycloakConfig.Realm, gocloak.GetClientsParams{
+	clients, err := gc.GetClients(context.Background(), client.jwt.AccessToken, keycloakConfig.Realm, gocloak.GetClientsParams{
 		ClientID: &keycloakConfig.ClientID,
 	})
 	if err != nil {

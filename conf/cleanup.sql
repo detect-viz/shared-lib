@@ -1,0 +1,2 @@
+DELETE FROM triggered_logs WHERE created_at < UNIX_TIMESTAMP(NOW() - INTERVAL 90 DAY);
+DELETE FROM notify_logs WHERE created_at < UNIX_TIMESTAMP(NOW() - INTERVAL 90 DAY);

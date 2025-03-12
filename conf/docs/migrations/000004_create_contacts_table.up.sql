@@ -1,0 +1,21 @@
+CREATE TABLE `contacts` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `realm_name` varchar(50) DEFAULT 'master',
+  `name` varchar(255) NOT NULL,
+  `type` varchar(50) NOT NULL,
+  `enabled` tinyint(1) DEFAULT '1',
+  `send_resolved` tinyint(1) DEFAULT '1',
+  `alerting_template_id` bigint DEFAULT NULL,
+  `resolved_template_id` bigint DEFAULT NULL,
+  `max_retry` int DEFAULT '3',
+  `retry_delay` varchar(10) DEFAULT '5m',
+  `details` json DEFAULT NULL,
+  `created_at` bigint unsigned DEFAULT NULL,
+  `updated_at` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_realm_name_name` (`realm_name`, `name`),
+  KEY `idx_realm_name` (`realm_name`),
+  CONSTRAINT `fk_contacts_realms` FOREIGN KEY (`realm_name`) REFERENCES `realms` (`name`),
+  CONSTRAINT `fk_contacts_alerting_templates` FOREIGN KEY (`alerting_template_id`) REFERENCES `templates` (`id`),
+  CONSTRAINT `fk_contacts_resolved_templates` FOREIGN KEY (`resolved_template_id`) REFERENCES `templates` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

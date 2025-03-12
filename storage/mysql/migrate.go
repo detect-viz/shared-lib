@@ -29,6 +29,7 @@ func (c *Client) LoadAlertMigrate(migratePath string) error {
 		driver,
 	)
 	if err != nil {
+		fmt.Println("❌ 遷移失敗", err)
 		return err
 	}
 
@@ -46,7 +47,7 @@ func (c *Client) AlertMenuMigration() error {
 	}
 
 	// 2. 規則與聯絡人關聯表
-	if err := c.db.AutoMigrate(&models.AlertRuleContact{}); err != nil {
+	if err := c.db.AutoMigrate(&models.RuleContact{}); err != nil {
 		return err
 	}
 

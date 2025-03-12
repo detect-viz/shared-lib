@@ -1,9 +1,7 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -95,11 +93,11 @@ func (m *ConfigManager) loadConfig() {
 			panic(fmt.Errorf("載入額外設定檔失敗: %w", err))
 		}
 		m.global = globalCfg
+
 	})
 	if strings.ToLower(m.config.Logger.Level) == "debug" {
 		// **確認環境變數是否生效**
-		b, _ := json.MarshalIndent(m.config.Logger, "", "\t")
-		os.Stdout.Write(b)
+		fmt.Printf("確認%v:%+v\n", configDir, m.config.Logger)
 	}
 }
 
@@ -107,11 +105,12 @@ func (m *ConfigManager) loadConfig() {
 func loadGlobalConfigs(v *viper.Viper, configDir string) (*models.GlobalConfig, error) {
 	files, err := filepath.Glob(filepath.Join(configDir, "*.yaml"))
 	if err != nil {
-		fmt.Println("無法讀取 `conf.d/` 目錄:", err)
+		fmt.Println("❌ 無法讀取 `conf.d/` 目錄:", err)
 		return nil, err
 	}
 
 	if len(files) == 0 {
+		fmt.Println("⚠️ `conf.d/` 目錄內沒有 `.yaml` 設定檔")
 		return nil, nil
 	}
 
@@ -120,20 +119,44 @@ func loadGlobalConfigs(v *viper.Viper, configDir string) (*models.GlobalConfig, 
 		subViper.SetConfigFile(file)
 
 		if err := subViper.ReadInConfig(); err != nil {
-			fmt.Println("讀取設定檔失敗:", file, err)
+			fmt.Println("❌ 讀取設定檔失敗:", file, err)
 			continue
 		}
 
 		// **合併 `conf.d/*.yaml` 設定**
 		v.MergeConfigMap(subViper.AllSettings())
 
-		fmt.Println("載入設定檔:", file)
-	}
-	var conf models.GlobalConfig
-	if err := v.Unmarshal(&conf); err != nil {
-		fmt.Println("解析設定檔失敗:", err)
+		fmt.Println("✅ 載入設定檔:", file)
 	}
 
+	// ✅ 檢查 Viper 是否有 `metric_rules`
+	//fmt.Printf("🔍 AllSettings: %+v\n", v.AllSettings())
+
+	var conf models.GlobalConfig
+	if err := v.Unmarshal(&conf); err != nil {
+		fmt.Println("❌ 解析 GlobalConfig 失敗:", err)
+		return nil, err
+	}
+
+	// 將 MetricRules 轉換為以 UID 為 key 的 map
+	if conf.MetricRules == nil {
+		conf.MetricRules = make(map[string]models.MetricRule)
+	}
+
+	// 檢查是否已經是 map 格式
+	if len(conf.MetricRules) == 0 {
+		// 嘗試從 v 中獲取 metric_rules 作為數組
+		var metricRulesArray []models.MetricRule
+		if err := v.UnmarshalKey("metric_rules", &metricRulesArray); err == nil && len(metricRulesArray) > 0 {
+			// 將數組轉換為 map
+			for _, rule := range metricRulesArray {
+				conf.MetricRules[rule.UID] = rule
+			}
+			fmt.Println("✅ 將 MetricRules 數組轉換為 map 格式，共", len(metricRulesArray), "條規則")
+		}
+	}
+
+	fmt.Println("✅ 載入 GlobalConfig 成功，MetricRules 數量:", len(conf.MetricRules))
 	return &conf, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -112,7 +113,14 @@ func (s *serviceImpl) sendWebhook(info common.NotifySetting) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to send message to %s: %d", info.Type, resp.StatusCode)
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response body: %w", err)
+		}
+		return fmt.Errorf(
+			"failed to send message to %s: %d, config: %v, payload: %s, response: %s",
+			info.Type, resp.StatusCode, info.Config, string(data), string(bodyBytes),
+		)
 	}
 
 	return nil

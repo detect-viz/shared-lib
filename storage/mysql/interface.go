@@ -2,43 +2,66 @@ package mysql
 
 import (
 	"github.com/detect-viz/shared-lib/models"
+	"github.com/detect-viz/shared-lib/models/label"
 )
 
 // 資料庫介面
 type Database interface {
+
+	// 告警檢查規則相關
+	GetActiveRules(realm, resourceName string) ([]models.Rule, error)
+	GetAllActiveRules() ([]models.Rule, error)
+
+	// 告警規則設定相關
+	CreateRule(rule *models.Rule) (*models.Rule, error)
+	CreateRules(rules []models.Rule) error
+	ListRules(realm string, cursor int64, limit int) ([]models.Rule, int64, error)
+	GetRule(id []byte) (*models.Rule, error)
+	UpdateRule(rule *models.Rule) (*models.Rule, error)
+	DeleteRule(id []byte) error
+
+	// 獲取自動匹配的規則
+	GetAutoApplyRulesByMetricRuleUIDs(realm string, metricRuleUIDs []string) ([]models.Rule, error)
+
+	// 聯絡人相關
+	CreateContact(contact *models.Contact) (*models.Contact, error)
+	ListContacts(realm string, cursor int64, limit int) ([]models.Contact, int64, error)
+	GetContact(id []byte) (*models.Contact, error)
+	UpdateContact(contact *models.Contact) (*models.Contact, error)
+	DeleteContact(id []byte) error
+	GetContactsByRuleID(ruleID []byte) ([]models.Contact, error)
+	IsUsedByRules(contactID []byte) (bool, error)
+
 	// 載入告警遷移
 	LoadAlertMigrate(path string) error
 
-	GetMetricRule(id int64) (models.MetricRule, error)
-	GetAlertRuleDetails(ruleID int64) ([]models.AlertRuleDetail, error)
-
-	GetAlertState(ruleDetailID int64) (models.AlertState, error)
-	SaveAlertState(state models.AlertState) error
-
-	// 聯絡人相關
-
-	CreateOrUpdateAlertContact(contact *models.Contact) error
-	CreateOrUpdateAlertRule(rule *models.Rule) error
+	// 告警狀態相關
+	GetRuleStateAndLock(ruleID []byte) (*models.RuleState, error)
+	UpdateRuleStateWithUpdates(oldState, newState models.RuleState) error
 
 	// 資源群組相關
-	GetResourceGroupName(id int64) (string, error)
+	GetResourceGroupName(id []byte) (string, error)
 
-	// TriggerLog 相關
-	GetActiveTriggerLog(ruleID int64, resourceName, metricName string) (*models.TriggerLog, error)
-	CreateTriggerLog(trigger models.TriggerLog) error
-	UpdateTriggerLog(trigger models.TriggerLog) error
-	UpdateTriggerLogNotifyState(uuid string, state string) error
-	UpdateTriggerLogResolvedNotifyState(uuid string, state string) error
-	GetTriggerLogsForAlertNotify(timestamp int64) ([]models.TriggerLog, error)
-	GetTriggerLogsForResolvedNotify(timestamp int64) ([]models.TriggerLog, error)
+	// 監控對象相關
+	CheckTargetExists(realm, dataSource, resourceName, partitionName string) (bool, error)
+	CreateTarget(target *models.Target) (*models.Target, error)
+
+	// TriggeredLog 相關
+	GetActiveTriggeredLog(ruleID []byte, resourceName, metricName string) (*models.TriggeredLog, error)
+	CreateTriggeredLog(triggered models.TriggeredLog) error
+	UpdateTriggeredLog(triggered models.TriggeredLog) error
+	UpdateTriggeredLogNotifyState(id []byte, state string) error
+	UpdateTriggeredLogResolvedNotifyState(id []byte, state string) error
+	GetTriggeredLogsForAlertNotify(timestamp int64) ([]models.TriggeredLog, error)
+	GetTriggeredLogsForResolvedNotify(timestamp int64) ([]models.TriggeredLog, error)
 
 	// NotifyLog 相關
 	CreateNotifyLog(notify models.NotifyLog) error
 	UpdateNotifyLog(notify models.NotifyLog) error
 
-	// CheckTriggerLogExists 相關
-	CheckTriggerLogExists(ruleID int64, resourceName string, metric string, firstTriggerTime int64) (bool, error)
-	UpdateTriggerLogResolved(ruleID int64, resourceName, metricName string, resolvedTime int64) error
+	// CheckTriggeredLogExists 相關
+	CheckTriggeredLogExists(ruleID []byte, resourceName string, metricName string, firstTriggeredTime int64) (bool, error)
+	UpdateTriggeredLogResolved(ruleID []byte, resourceName, metricName string, resolvedTime int64) error
 
 	// Template 相關
 	GetTemplate(realm string, ruleState string, format string) (models.Template, error)
@@ -46,34 +69,19 @@ type Database interface {
 	// 抑制規則相關
 	CreateMute(mute *models.Mute) error
 	ListMutes(realm string) ([]models.Mute, error)
-	GetMute(id int64) (*models.Mute, error)
+	GetMute(id string) (*models.Mute, error)
 	UpdateMute(mute *models.Mute) error
-	DeleteMute(id int64) error
+	DeleteMute(id string) error
 
-	// 告警規則相關
-	CreateRule(rule *models.Rule) error
-	ListRules(realm string) ([]models.Rule, error)
-	GetRule(id int64) (*models.Rule, error)
-	UpdateRule(rule *models.Rule) error
-	DeleteRule(id int64) error
-
-	// 告警規則相關
-	CreateLabel(label *models.Label) error
-	GetLabel(id int64) (*models.Label, error)
-	ListLabels(realm string, limit, offset int) ([]models.Label, error)
-	UpdateLabel(label *models.Label) error
+	// 標籤相關
+	CreateLabel(label *label.LabelKey, values []string) (*label.LabelKey, error)
+	GetLabel(id int64) (*label.LabelKey, error)
+	ListLabels(realm string, cursor int64, limit int) ([]label.LabelKey, int64, error)
+	UpdateLabel(id int64, values []string) (*label.LabelKey, error)
 	DeleteLabel(id int64) error
-	UpdateKey(realm, oldKey, newKey string) error
-	ExistsLabel(realm, key string) (bool, error)
-	BulkCreateOrUpdateLabel(realm string, labels []models.Label) ([]models.Label, error)
-	GetLabelByRuleID(ruleID int64) ([]models.Label, error)
-	// 聯絡人相關
-	CreateContact(contact *models.Contact) error
-	ListContacts(realm string) ([]models.Contact, error)
-	GetContact(id int64) (*models.Contact, error)
-	UpdateContact(contact *models.Contact) error
-	DeleteContact(id int64) error
-	GetContactsByRuleID(ruleID int64) ([]models.Contact, error)
+	UpdateLabelKeyName(realm, oldKey, newKey string) (*label.LabelKey, error)
+	BulkCreateOrUpdateLabel(realm string, labels []models.LabelDTO) error
+	GetRuleLabelByRuleID(ruleID []byte) (map[string]string, error)
 
 	// 資源群組相關
 	CreateResourceGroup(resourceGroup *models.ResourceGroup) error

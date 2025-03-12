@@ -14,10 +14,13 @@ import (
 )
 
 // SchedulerSet 提供 Scheduler
-var SchedulerSet = wire.NewSet(NewService)
+var SchedulerSet = wire.NewSet(
+	NewService,
+	wire.Bind(new(Service), new(*serviceImpl)),
+)
 
 // Scheduler 排程管理器
-type Service struct {
+type serviceImpl struct {
 	cron   *cron.Cron
 	tasks  map[string]models.TaskInfo
 	logger logger.Logger
@@ -25,8 +28,8 @@ type Service struct {
 }
 
 // NewScheduler 創建排程管理器
-func NewService(logger logger.Logger) *Service {
-	return &Service{
+func NewService(logger logger.Logger) *serviceImpl {
+	return &serviceImpl{
 		cron:   cron.New(cron.WithSeconds()),
 		tasks:  make(map[string]models.TaskInfo),
 		logger: logger.With(zap.String("module", "scheduler")), // 添加模組標識
@@ -34,7 +37,7 @@ func NewService(logger logger.Logger) *Service {
 }
 
 // 註冊任務
-func (s *Service) RegisterTask(task models.Task) error {
+func (s *serviceImpl) RegisterTask(task models.Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -61,7 +64,7 @@ func (s *Service) RegisterTask(task models.Task) error {
 }
 
 // validateJob 驗證任務
-func (s *Service) validateJob(name, spec string) error {
+func (s *serviceImpl) validateJob(name, spec string) error {
 	if _, exists := s.tasks[name]; exists {
 		return fmt.Errorf("task %s already exists", name)
 	}
@@ -75,7 +78,7 @@ func (s *Service) validateJob(name, spec string) error {
 }
 
 // 添加任務
-func (s *Service) addTask(spec string, fn func() error) (cron.EntryID, error) {
+func (s *serviceImpl) addTask(spec string, fn func() error) (cron.EntryID, error) {
 	id, err := s.cron.AddFunc(spec, func() {
 		err := fn()
 		if err != nil {
@@ -90,7 +93,7 @@ func (s *Service) addTask(spec string, fn func() error) (cron.EntryID, error) {
 }
 
 // Start 啟動排程器
-func (s *Service) Start() error {
+func (s *serviceImpl) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -107,7 +110,7 @@ func (s *Service) Start() error {
 }
 
 // Stop 停止排程器
-func (s *Service) Stop() {
+func (s *serviceImpl) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -123,7 +126,7 @@ func (s *Service) Stop() {
 }
 
 // GetTaskInfo 獲取任務資訊
-func (s *Service) GetTaskInfo(name string) (common.TaskInfo, bool) {
+func (s *serviceImpl) GetTaskInfo(name string) (common.TaskInfo, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -144,7 +147,7 @@ func (s *Service) GetTaskInfo(name string) (common.TaskInfo, bool) {
 }
 
 // ListTasks 列出所有任務
-func (s *Service) ListTasks() map[string]common.TaskInfo {
+func (s *serviceImpl) ListTasks() map[string]common.TaskInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -164,7 +167,7 @@ func (s *Service) ListTasks() map[string]common.TaskInfo {
 }
 
 // PauseTask 暫停任務
-func (s *Service) PauseTask(name string) error {
+func (s *serviceImpl) PauseTask(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -181,7 +184,7 @@ func (s *Service) PauseTask(name string) error {
 }
 
 // ResumeTask 恢復任務
-func (s *Service) ResumeTask(name string) error {
+func (s *serviceImpl) ResumeTask(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -207,7 +210,7 @@ func (s *Service) ResumeTask(name string) error {
 }
 
 // RunTaskNow 立即執行任務
-func (s *Service) RunTaskNow(name string) error {
+func (s *serviceImpl) RunTaskNow(name string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

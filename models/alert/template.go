@@ -1,17 +1,17 @@
 package alert
 
-import "time"
+import "github.com/detect-viz/shared-lib/models/common"
 
-// Template 通知模板
+// 通知模板
 type Template struct {
-	RealmName string    `json:"realm_name" gorm:"default:master"`
-	ID        int64     `json:"id" gorm:"primaryKey;autoIncrement"`
-	IsDefault bool      `json:"is_default" gorm:"default:false;index"`
-	Name      string    `json:"name"`
-	Format    string    `json:"format" gorm:"type:enum('html','text','markdown','json')"`
-	RuleState string    `json:"rule_state" gorm:"type:enum('alerting','resolved','normal','disabled')"`
-	Title     string    `json:"title" gorm:"type:text"`
-	Message   string    `json:"message" gorm:"type:text"`
-	CreatedAt time.Time `json:"-" form:"created_at"`
-	UpdatedAt time.Time `json:"-" form:"updated_at"`
+	RealmName  string `yaml:"realm_name" json:"realm_name"`
+	ID         []byte `yaml:"id" json:"id" gorm:"primary_key"`
+	Name       string `yaml:"name" json:"name"`
+	CreateType string `yaml:"create_type" json:"create_type" gorm:"type:enum('system','user');not null"`
+	FormatType string `yaml:"format_type" json:"format_type" gorm:"type:enum('html','text','markdown','json');not null"`
+	RuleState  string `yaml:"rule_state" json:"rule_state" gorm:"type:enum('alerting','resolved');not null"`
+	Title      string `yaml:"title" json:"title" gorm:"type:text;not null"`
+	Message    string `yaml:"message" json:"message" gorm:"type:text;not null"`
+	common.AuditUserModel
+	common.AuditTimeModel
 }

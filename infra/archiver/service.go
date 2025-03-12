@@ -21,24 +21,26 @@ import (
 )
 
 // ArchiverSet 提供 ArchiverService
-var ArchiverSet = wire.NewSet(NewService)
+var ArchiverSet = wire.NewSet(NewService,
+	wire.Bind(new(Service), new(*ServiceImpl)),
+)
 
 // LogRotator 日誌輪轉器
-type Service struct {
-	logger    logger.Logger
-	scheduler *scheduler.Service
+type ServiceImpl struct {
+	logger           logger.Logger
+	SchedulerService scheduler.Service
 }
 
 // 創建日誌輪轉器
-func NewService(logger logger.Logger, scheduler *scheduler.Service) *Service {
-	return &Service{
-		logger:    logger,
-		scheduler: scheduler,
+func NewService(logger logger.Logger, schedulerService scheduler.Service) *ServiceImpl {
+	return &ServiceImpl{
+		logger:           logger,
+		SchedulerService: schedulerService,
 	}
 }
 
 // PrepareDir 檢查並創建目標目錄
-func (s *Service) prepareDir(path string) error {
+func (s *ServiceImpl) prepareDir(path string) error {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := os.MkdirAll(path, 0755); err != nil {
 			return fmt.Errorf("創建目錄失敗: %s", path)
@@ -48,7 +50,7 @@ func (s *Service) prepareDir(path string) error {
 }
 
 // 檢查目錄大小是否超過最大大小
-func (r *Service) isExceedMaxSize(dir string, maxSizeMB int64) bool {
+func (r *ServiceImpl) isExceedMaxSize(dir string, maxSizeMB int64) bool {
 	var size int64
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -63,7 +65,7 @@ func (r *Service) isExceedMaxSize(dir string, maxSizeMB int64) bool {
 }
 
 // 清理舊檔案
-func (r *Service) cleanOldFiles(sourcePath string, maxAge time.Duration) error {
+func (r *ServiceImpl) cleanOldFiles(sourcePath string, maxAge time.Duration) error {
 	files, err := r.listFiles(sourcePath)
 	if err != nil {
 		return err
@@ -83,7 +85,7 @@ func (r *Service) cleanOldFiles(sourcePath string, maxAge time.Duration) error {
 }
 
 // 壓縮舊日誌
-func (r *Service) compressOldLogs(sourcePath string, destPath string, compressMatchRegex, compressSaveRegex string, compressOffsetHours int) error {
+func (r *ServiceImpl) compressOldLogs(sourcePath string, destPath string, compressMatchRegex, compressSaveRegex string, compressOffsetHours int) error {
 
 	files, err := r.listCompressableFiles(sourcePath, compressMatchRegex, compressOffsetHours)
 	if err != nil {
@@ -101,7 +103,7 @@ func (r *Service) compressOldLogs(sourcePath string, destPath string, compressMa
 }
 
 // 列出目錄中的所有檔案
-func (r *Service) listFiles(path string) ([]os.FileInfo, error) {
+func (r *ServiceImpl) listFiles(path string) ([]os.FileInfo, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
@@ -130,7 +132,7 @@ func (r *Service) listFiles(path string) ([]os.FileInfo, error) {
 }
 
 // 列出可壓縮的檔案
-func (r *Service) listCompressableFiles(sourcePath string, compressMatchRegex string, compressOffsetHours int) ([]os.FileInfo, error) {
+func (r *ServiceImpl) listCompressableFiles(sourcePath string, compressMatchRegex string, compressOffsetHours int) ([]os.FileInfo, error) {
 	files, err := r.listFiles(sourcePath)
 	if err != nil {
 		return nil, err
@@ -165,7 +167,7 @@ func (r *Service) listCompressableFiles(sourcePath string, compressMatchRegex st
 }
 
 // 壓縮檔案
-func (r *Service) compressFile(sourcePath string, destPath string, compressSaveRegex string, file os.FileInfo) error {
+func (r *ServiceImpl) compressFile(sourcePath string, destPath string, compressSaveRegex string, file os.FileInfo) error {
 	srcPath := filepath.Join(sourcePath, file.Name())
 
 	// 替換日期變量
@@ -229,7 +231,7 @@ func (r *Service) compressFile(sourcePath string, destPath string, compressSaveR
 }
 
 // 檢查磁碟空間是否不足
-func (r *Service) isLowDiskSpace(path string, minFreeMB int64) bool {
+func (r *ServiceImpl) isLowDiskSpace(path string, minFreeMB int64) bool {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
 		r.logger.Error("檢查磁碟空間失敗",

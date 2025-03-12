@@ -2,42 +2,52 @@ package controller
 
 import (
 	"github.com/detect-viz/shared-lib/alert"
+	"github.com/detect-viz/shared-lib/api/middleware"
+	"github.com/detect-viz/shared-lib/auth/keycloak"
 	"github.com/detect-viz/shared-lib/contacts"
-	"github.com/detect-viz/shared-lib/labels"
-	"github.com/detect-viz/shared-lib/mutes"
+	"github.com/detect-viz/shared-lib/notifier"
 	"github.com/detect-viz/shared-lib/rules"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type AlertAPI struct {
 	alertService   *alert.Service
-	muteService    mutes.Service
 	ruleService    rules.Service
 	contactService contacts.Service
-	labelService   labels.Service
+	notifyService  notifier.Service
+	logger         *zap.Logger
 }
 
 func NewAlertAPI(alertService *alert.Service) *AlertAPI {
 	return &AlertAPI{
 		alertService:   alertService,
-		muteService:    alertService.GetMuteService(),
 		ruleService:    alertService.GetRuleService(),
 		contactService: alertService.GetContactService(),
-		labelService:   alertService.GetLabelService(),
+		notifyService:  alertService.GetNotifyService(),
+		logger:         alertService.GetLogger(),
 	}
 }
 
 // RegisterV1Routes 註冊 v1 版本 API
-func RegisterV1Routes(router *gin.Engine, alertService *alert.Service) {
+func RegisterV1Routes(router *gin.Engine, alertService *alert.Service, keycloak keycloak.Client) {
 	v1 := router.Group("/api/v1/alert")
 
 	// 初始化 API Controller
 	alertAPI := NewAlertAPI(alertService)
+	v1.Use(middleware.GetUserInfo(keycloak, alertService, &gin.Context{}))
 
+	{
+		v1.POST("/run-alert", alertAPI.ProcessAlert)
+		v1.POST("/run-notify", alertAPI.ProcessNotifyLog)
+	}
 	// 註冊告警相關 API
 	{
-		v1.GET("/state", alertAPI.ListAlertState)
+		v1.GET("/state", alertAPI.ListRuleState)
 		v1.GET("/history", alertAPI.ListAlertHistory)
+		v1.GET("/rule/metric-rule/:uid", alertAPI.GetMetricRule)
+		v1.GET("/rule/metric-rule-options/:category", alertAPI.GetMetricRuleOptions)
+		v1.GET("/rule/metric-rule-category-options", alertAPI.GetMetricRuleCategoryOptions)
 	}
 
 	// 註冊告警相關 API
@@ -48,16 +58,7 @@ func RegisterV1Routes(router *gin.Engine, alertService *alert.Service) {
 		ruleRoutes.POST("", alertAPI.CreateRule)
 		ruleRoutes.PUT("/:id", alertAPI.UpdateRule)
 		ruleRoutes.DELETE("/:id", alertAPI.DeleteRule)
-	}
-
-	// 註冊抑制規則 API (mute)
-	muteRoutes := v1.Group("/mute")
-	{
-		muteRoutes.GET("", alertAPI.ListMutes)
-		muteRoutes.GET("/:id", alertAPI.GetMute)
-		muteRoutes.POST("", alertAPI.CreateMute)
-		muteRoutes.PUT("/:id", alertAPI.UpdateMute)
-		muteRoutes.DELETE("/:id", alertAPI.DeleteMute)
+		ruleRoutes.POST("/manual-notify", alertAPI.ManualNotify)
 	}
 
 	// 註冊聯絡人 API
@@ -68,17 +69,8 @@ func RegisterV1Routes(router *gin.Engine, alertService *alert.Service) {
 		contactRoutes.POST("", alertAPI.CreateContact)
 		contactRoutes.PUT("/:id", alertAPI.UpdateContact)
 		contactRoutes.DELETE("/:id", alertAPI.DeleteContact)
-	}
-
-	// 註冊標籤 API
-	labelRoutes := v1.Group("/label")
-	{
-		labelRoutes.GET("", alertAPI.ListLabels)
-		labelRoutes.GET("/:key", alertAPI.GetLabel)
-		labelRoutes.POST("", alertAPI.CreateLabel)
-		labelRoutes.PUT("/:key", alertAPI.UpdateLabel)
-		labelRoutes.DELETE("/:key", alertAPI.DeleteLabel)
-		labelRoutes.GET("/export", alertAPI.ExportCSV)
-		labelRoutes.POST("/import", alertAPI.ImportCSV)
+		contactRoutes.POST("/test", alertAPI.TestContact)
+		contactRoutes.GET("/notify-methods", alertAPI.GetNotifyMethods)
+		contactRoutes.GET("/notify-options", alertAPI.GetNotifyOptions)
 	}
 }

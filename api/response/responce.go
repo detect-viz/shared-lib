@@ -25,12 +25,12 @@ func JSONResponse(c *gin.Context, status int, data interface{}, message string) 
 
 // JSONSuccess - 成功回應
 func JSONSuccess(c *gin.Context, data interface{}) {
-	JSONResponse(c, http.StatusOK, data, "成功")
+	JSONResponse(c, http.StatusOK, data, "success")
 }
 
 // JSONCreated - 創建成功
 func JSONCreated(c *gin.Context, data interface{}) {
-	JSONResponse(c, http.StatusCreated, data, "創建成功")
+	JSONResponse(c, http.StatusCreated, data, "created")
 }
 
 // JSONError - 錯誤回應

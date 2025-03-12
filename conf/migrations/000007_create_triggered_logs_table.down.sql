@@ -1,0 +1,1 @@
+drop table if exists triggered_logs;

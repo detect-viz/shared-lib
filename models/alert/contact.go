@@ -1,36 +1,71 @@
 package alert
 
 import (
-	"time"
+	"database/sql/driver"
+	"errors"
+	"strings"
 
-	"gorm.io/gorm"
+	"github.com/detect-viz/shared-lib/models/common"
 )
 
-// Contact 通知聯繫人
 type Contact struct {
-	ID           int64  `json:"id" gorm:"primaryKey;autoIncrement"`
-	RealmName    string `json:"realm_name" gorm:"default:master"`
-	Name         string `json:"name"` // 聯繫人名稱
-	Type         string `json:"type"` // 通知類型
-	Enabled      bool   `json:"enabled" gorm:"default:1"`
-	SentResolved bool   `json:"sent_resolved" gorm:"default:1"`
-	MaxRetry     int    `json:"max_retry" gorm:"default:3"`
-	RetryDelay   int    `json:"retry_delay" gorm:"default:300"`
-
-	Details    JSONMap                `json:"details" gorm:"type:json"`
-	Severities []AlertContactSeverity `json:"severities"  gorm:"many2many:alert_contact_severities"`
-	CreatedAt  time.Time              `json:"-" form:"created_at"`
-	UpdatedAt  time.Time              `json:"-" form:"updated_at"`
-	DeletedAt  gorm.DeletedAt         `json:"deleted_at" gorm:"index"`
+	ID           []byte         `json:"id" gorm:"index"`
+	RealmName    string         `json:"realm_name" gorm:"default:master"`
+	Name         string         `json:"name"`
+	ChannelType  string         `json:"channel_type"`
+	Enabled      bool           `json:"enabled" gorm:"default:1"`
+	SendResolved bool           `json:"send_resolved" gorm:"default:1"`
+	MaxRetry     int            `json:"max_retry" gorm:"default:3"`
+	RetryDelay   string         `json:"retry_delay" gorm:"default:5m"`
+	Config       common.JSONMap `json:"config" gorm:"type:json"`
+	Severities   SeveritySet    `json:"severities" gorm:"type:set('info','warn','crit');default:'crit'"`
+	common.AuditUserModel
+	common.AuditTimeModel
 }
 
-// AlertContactSeverity (多對多關聯)
-type AlertContactSeverity struct {
-	AlertContactID int64  `json:"alert_contact_id"`
-	Severity       string `json:"severity" gorm:"type:enum('info','warn','crit');unique"`
+type ContactResponse struct {
+	ID           string                 `json:"id"`
+	RealmName    string                 `json:"realm_name"`
+	Name         string                 `json:"name"`
+	ChannelType  string                 `json:"channel_type"`
+	Enabled      bool                   `json:"enabled"`
+	SendResolved bool                   `json:"send_resolved"`
+	MaxRetry     int                    `json:"max_retry"`
+	RetryDelay   string                 `json:"retry_delay"`
+	Config       map[string]interface{} `json:"config"`
+	Severities   []string               `json:"severities"`
 }
 
-type AlertRuleContact struct {
-	AlertRuleID    int64 `json:"alert_rule_id"`
-	AlertContactID int64 `json:"alert_contact_id"`
+// 綁定聯絡人 many2many
+type RuleContact struct {
+	RuleID    []byte `gorm:"type:binary(16);primaryKey"`
+	ContactID []byte `gorm:"type:binary(16);primaryKey"`
+}
+
+// SeveritySet 讓 GORM 正確處理 MySQL SET
+type SeveritySet []string
+
+// 允許的 SET 值
+var validSeverities = map[string]bool{
+	"info": true, "warn": true, "crit": true,
+}
+
+// 從資料庫讀取
+func (s *SeveritySet) Scan(value interface{}) error {
+	str, ok := value.(string)
+	if !ok {
+		return errors.New("failed to scan SeveritySet")
+	}
+	*s = strings.Split(str, ",")
+	return nil
+}
+
+// 存入資料庫
+func (s SeveritySet) Value() (driver.Value, error) {
+	for _, v := range s {
+		if !validSeverities[v] {
+			return nil, errors.New("invalid severity value: " + v)
+		}
+	}
+	return strings.Join(s, ","), nil //
 }

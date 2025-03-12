@@ -14,7 +14,10 @@ import (
 )
 
 // MySQLSet 提供 gorm.DB
-var MySQLSet = wire.NewSet(NewClient)
+var MySQLSet = wire.NewSet(
+	NewClient,
+	wire.Bind(new(Database), new(*Client)),
+)
 
 // MySQL 資料庫連接器
 type Client struct {

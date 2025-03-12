@@ -1,0 +1,22 @@
+CREATE TABLE `notify_logs` (
+  `realm_name` varchar(50) NOT NULL,
+  `id` VARCHAR(36) NOT NULL PRIMARY KEY,
+  `timestamp` bigint NOT NULL,
+  `contact_id` bigint NOT NULL,
+  `contact_name` varchar(100) NOT NULL,
+  `contact_type` varchar(50) NOT NULL,
+  `contact_max_retry` int DEFAULT '3',
+  `contact_retry_delay` int DEFAULT '300',
+  `title` text NOT NULL,
+  `message` text NOT NULL,
+  `rule_state` enum('alerting','resolved') NOT NULL,
+  `notify_state` enum('solved','failed') NOT NULL,
+  `sent_at` bigint DEFAULT NULL,
+  `error` text,
+  `retry_counter` int DEFAULT '0',
+  `created_at` bigint unsigned DEFAULT NULL,
+  `updated_at` bigint unsigned DEFAULT NULL,
+  INDEX `idx_notify_log` (`id`),
+  KEY `fk_notify_logs_realms` (`realm_name`),
+  CONSTRAINT `fk_notify_logs_realms` FOREIGN KEY (`realm_name`) REFERENCES `realms` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

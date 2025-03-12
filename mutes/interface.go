@@ -24,5 +24,4 @@ type Service interface {
 	IsRuleMuted(ruleID int64, t time.Time) bool
 	GetMutePeriod(resourceGroupID int64, t time.Time) (int64, int64)
 	ValidateTimeRange(start, end time.Time) error
-	CheckName(mute models.Mute) (bool, string)
 }

@@ -1,10 +1,10 @@
 package alert
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"text/template"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/detect-viz/shared-lib/models"
@@ -12,6 +12,14 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
+
+// 通知狀態常量：
+// NotifyStatePending - 等待處理
+// NotifyStateSent - 已發送告警
+// NotifyStateSolved - 已發送恢復
+// NotifyStateProcessed - 已處理
+// NotifyStateDelayed - 等待重試
+// NotifyStateFailed - 發送失敗
 
 // NotificationService 子函數說明：
 // GetTriggeredLogs - 查詢未發送通知的 TriggeredLog
@@ -21,62 +29,77 @@ import (
 // RecordNotifyLog - 記錄 NotifyLog
 // RetryFailedNotifications - retry 機制 (RetryDelay & MaxRetry)
 
+// 通知狀態常量
+const (
+	NotifyStatePending   = "pending"   // 等待處理
+	NotifyStateSent      = "sent"      // 已發送告警
+	NotifyStateSolved    = "solved"    // 已發送恢復
+	NotifyStateProcessed = "processed" // 已處理
+	NotifyStateDelayed   = "delayed"   // 等待重試
+	NotifyStateFailed    = "failed"    // 發送失敗
+)
+
+// ErrorMessage 錯誤訊息結構
+type ErrorMessage struct {
+	Time    int64                  `json:"time"`
+	Type    string                 `json:"type"`
+	Message string                 `json:"message"`
+	Extra   map[string]interface{} `json:"extra,omitempty"`
+}
+
 // ProcessNotifyLog 處理通知日誌
 func (s *Service) ProcessNotifyLog() error {
 	s.logger.Info("開始處理通知日誌")
 
-	// 1. 查詢未發送通知的 TriggeredLog
+	// 1. 查詢需要發送通知的 TriggeredLog
 	currentTime := time.Now().Unix()
 	triggeredLogs, err := s.mysql.GetTriggeredLogsForAlertNotify(currentTime)
 	if err != nil {
 		return fmt.Errorf("獲取待通知的 TriggeredLog 失敗: %w", err)
 	}
 
-	if len(triggeredLogs) == 0 {
-		s.logger.Info("沒有需要發送通知的告警")
+	// 將日誌分為異常通知和恢復通知
+	var alertingLogs, resolvedLogs []models.TriggeredLog
+	for _, log := range triggeredLogs {
+		if log.NotifyState == NotifyStatePending {
+			alertingLogs = append(alertingLogs, log)
+		}
+		if log.ResolvedNotifyState != nil && *log.ResolvedNotifyState == NotifyStatePending {
+			resolvedLogs = append(resolvedLogs, log)
+		}
+	}
+
+	s.logger.Info("找到需要發送通知的告警",
+		zap.Int("alerting_count", len(alertingLogs)),
+		zap.Int("resolved_count", len(resolvedLogs)))
+
+	// 2. 分別處理異常通知和恢復通知
+	if err := s.processNotifications(alertingLogs, "alerting"); err != nil {
+		s.logger.Error("處理異常通知失敗", zap.Error(err))
+	}
+
+	if err := s.processNotifications(resolvedLogs, "resolved"); err != nil {
+		s.logger.Error("處理恢復通知失敗", zap.Error(err))
+	}
+
+	// 3. 處理需要重試的通知
+	if err := s.retryFailedNotifications(); err != nil {
+		s.logger.Error("重試失敗的通知時出錯", zap.Error(err))
+	}
+
+	return nil
+}
+
+// processNotifications 處理指定類型的通知
+func (s *Service) processNotifications(logs []models.TriggeredLog, notifyType string) error {
+	if len(logs) == 0 {
 		return nil
 	}
 
-	// 讓 TriggeredLog.notify_state = processed，避免重複發送
-	for _, log := range triggeredLogs {
-		log.NotifyState = "processed"
-		if err := s.mysql.UpdateTriggeredLog(log); err != nil {
-			s.logger.Error("更新 TriggeredLog 通知狀態失敗", zap.Error(err), zap.String("triggered_log_id", string(log.ID)))
-		}
-	}
+	// 1. 按 ContactID 分組
+	groupedLogs := s.GroupByContact(logs)
 
-	s.logger.Info("找到需要發送通知的告警", zap.Int("count", len(triggeredLogs)))
-
-	// 2. 按 ContactID 分組
-	groupedLogs := make(map[string][]models.TriggeredLog)
-
-	for _, log := range triggeredLogs {
-		// 獲取規則關聯的聯絡人
-		contacts, err := s.mysql.GetContactsByRuleID(log.RuleID)
-		if err != nil {
-			s.logger.Error("獲取規則關聯的聯絡人失敗", zap.Error(err), zap.String("rule_id", string(log.RuleID)))
-			continue
-		}
-
-		// 按嚴重度篩選聯絡人
-		for _, contact := range contacts {
-			// 檢查聯絡人是否啟用
-			if !contact.Enabled {
-				continue
-			}
-
-			// 檢查聯絡人是否接收該嚴重度的告警
-			if !s.shouldNotifyContact(contact, log.Severity) {
-				continue
-			}
-
-			// 將 TriggeredLog 添加到對應聯絡人的分組中
-			contactID := string(contact.ID)
-			groupedLogs[contactID] = append(groupedLogs[contactID], log)
-		}
-	}
-
-	// 3. 處理每組通知
+	// 2. 處理每組通知
 	for contactID, logs := range groupedLogs {
 		// 獲取聯絡人信息
 		contact, err := s.mysql.GetContact([]byte(contactID))
@@ -93,59 +116,76 @@ func (s *Service) ProcessNotifyLog() error {
 		// 創建通知日誌
 		notifyLog := s.createNotifyLog(contact, logs)
 
-		// 4. 渲染模板
-		title, message, err := s.renderTemplate(contact, logs)
+		// 3. 渲染模板
+		title, message, err := s.renderTemplate(contact, logs, notifyType)
 		if err != nil {
 			s.logger.Error("渲染模板失敗", zap.Error(err), zap.String("contact_id", contactID))
-			notifyLog.State = "failed"
+			notifyLog.State = NotifyStateFailed
+
+			// 創建錯誤訊息
 			errorMsg := fmt.Sprintf("渲染模板失敗: %s", err.Error())
-			notifyLog.ErrorMessage = &errorMsg
+			errorMessages := make(common.JSONMap)
+			errorMessages["error"] = errorMsg
+			notifyLog.ErrorMessages = &errorMessages
+
 			if err := s.mysql.CreateNotifyLog(notifyLog); err != nil {
 				s.logger.Error("記錄通知失敗日誌失敗", zap.Error(err))
 			}
 			continue
 		}
 
-		// 5. 發送通知
+		// 4. 發送通知
 		err = s.sendNotification(contact, title, message)
 		sentTime := time.Now().Unix()
 
 		if err != nil {
 			// 通知發送失敗
 			s.logger.Error("發送通知失敗", zap.Error(err), zap.String("contact_id", contactID))
-			notifyLog.State = "failed"
+			notifyLog.State = NotifyStateFailed
+
+			// 創建錯誤訊息
 			errorMsg := fmt.Sprintf("發送通知失敗: %s", err.Error())
-			notifyLog.ErrorMessage = &errorMsg
+			errorMessages := make(common.JSONMap)
+			errorMessages["error"] = errorMsg
+			notifyLog.ErrorMessages = &errorMessages
 		} else {
 			// 通知發送成功
 			s.logger.Info("發送通知成功", zap.String("contact_id", contactID))
-			notifyLog.State = "sent"
+			if notifyType == "alerting" {
+				notifyLog.State = NotifyStateSent
+			} else {
+				notifyLog.State = NotifyStateSolved
+			}
 			notifyLog.SentAt = &sentTime
 		}
 
-		// 6. 記錄 NotifyLog
+		// 5. 記錄 NotifyLog
 		if err := s.mysql.CreateNotifyLog(notifyLog); err != nil {
 			s.logger.Error("記錄通知日誌失敗", zap.Error(err))
 			continue
 		}
 
-		// 更新 TriggeredLog 的通知狀態
+		// 6. 更新 TriggeredLog 的通知狀態
 		for _, log := range logs {
-			if err := s.mysql.UpdateTriggeredLogNotifyState(log.ID, notifyLog.State); err != nil {
-				s.logger.Error("更新 TriggeredLog 通知狀態失敗", zap.Error(err), zap.String("triggered_log_id", string(log.ID)))
+			var err error
+			if notifyType == "alerting" {
+				err = s.mysql.UpdateTriggeredLogNotifyState(log.ID, notifyLog.State)
+			} else {
+				err = s.mysql.UpdateTriggeredLogResolvedNotifyState(log.ID, notifyLog.State)
+			}
+			if err != nil {
+				s.logger.Error("更新 TriggeredLog 通知狀態失敗",
+					zap.Error(err),
+					zap.String("triggered_log_id", string(log.ID)),
+					zap.String("notify_type", notifyType))
 			}
 		}
-	}
-
-	// 7. 處理需要重試的通知
-	if err := s.retryFailedNotifications(); err != nil {
-		s.logger.Error("重試失敗的通知時出錯", zap.Error(err))
 	}
 
 	return nil
 }
 
-// shouldNotifyContact 檢查聯絡人是否應該接收該嚴重度的告警
+// 檢查聯絡人是否應該接收該嚴重度的告警
 func (s *Service) shouldNotifyContact(contact models.Contact, severity string) bool {
 	for _, s := range contact.Severities {
 		if s == severity {
@@ -155,7 +195,7 @@ func (s *Service) shouldNotifyContact(contact models.Contact, severity string) b
 	return false
 }
 
-// createNotifyLog 創建通知日誌
+// 創建通知日誌
 func (s *Service) createNotifyLog(contact *models.Contact, logs []models.TriggeredLog) models.NotifyLog {
 	// 創建 TriggeredLogIDs 列表
 	triggeredLogIDs := make([]map[string]interface{}, 0, len(logs))
@@ -170,24 +210,32 @@ func (s *Service) createNotifyLog(contact *models.Contact, logs []models.Trigger
 	var contactSnapshot common.JSONMap
 	json.Unmarshal(contactData, &contactSnapshot)
 
+	// 創建錯誤訊息存儲
+	errorMessages := make(common.JSONMap)
+
 	// 生成通知日誌
 	id := uuid.New()
 	return models.NotifyLog{
 		RealmName:       contact.RealmName,
 		ID:              id[:],
-		State:           "pending",
+		State:           NotifyStatePending,
 		RetryCounter:    0,
 		TriggeredLogIDs: triggeredLogIDs,
 		ContactID:       contact.ID,
 		ChannelType:     contact.ChannelType,
 		ContactSnapshot: contactSnapshot,
+		ErrorMessages:   &errorMessages,
 	}
 }
 
-// renderTemplate 渲染通知模板
-func (s *Service) renderTemplate(contact *models.Contact, logs []models.TriggeredLog) (string, string, error) {
-	// 獲取適用的模板
-	tmpl, err := s.mysql.GetTemplate(contact.RealmName, "alerting", contact.ChannelType)
+// 渲染通知模板
+func (s *Service) renderTemplate(contact *models.Contact, logs []models.TriggeredLog, notifyType string) (string, string, error) {
+
+	// 獲取 FormatType
+	formatType := GetFormatByType(contact.ChannelType)
+
+	// 獲取通知模板
+	tmpl, err := s.mysql.GetTemplate(contact.RealmName, notifyType, formatType)
 	if err != nil {
 		return "", "", fmt.Errorf("獲取模板失敗: %w", err)
 	}
@@ -199,124 +247,280 @@ func (s *Service) renderTemplate(contact *models.Contact, logs []models.Triggere
 			"channel_type": contact.ChannelType,
 			"realm_name":   contact.RealmName,
 		},
-		"alerts": make([]map[string]interface{}, 0, len(logs)),
-		"count":  len(logs),
+		"count": len(logs),
 	}
 
-	// 處理每個告警的數據
+	// 計算影響的主機數量和告警類型
+	hostMap := make(map[string]bool)
+	categoryMap := make(map[string]bool)
 	for _, log := range logs {
-		alertData := map[string]interface{}{
-			"id":              string(log.ID),
-			"triggered_at":    time.Unix(log.TriggeredAt, 0).Format(time.RFC3339),
-			"severity":        log.Severity,
-			"resource_name":   log.ResourceName,
-			"partition_name":  log.PartitionName,
-			"triggered_value": log.TriggeredValue,
-			"threshold":       log.Threshold,
+		hostMap[log.ResourceName] = true
+		categoryMap[log.MetricRuleUID] = true
+	}
+
+	// 添加統計信息
+	data["affected_hosts_count"] = len(hostMap)
+	data["affected_alerts_count"] = len(logs)
+
+	// 收集告警類別
+	categories := make([]string, 0, len(categoryMap))
+	for category := range categoryMap {
+		categories = append(categories, category)
+	}
+	data["alert_categories"] = strings.Join(categories, ", ")
+
+	// 處理告警數據
+	if notifyType == "alerting" {
+		// 按嚴重程度分組
+		severityGroups := make(map[string]map[string]interface{})
+		for _, log := range logs {
+			// 如果該嚴重程度不存在，創建它
+			if _, exists := severityGroups[log.Severity]; !exists {
+				severityGroups[log.Severity] = map[string]interface{}{
+					"severity": log.Severity,
+					"count":    0,
+					"hosts":    make(map[string]map[string]interface{}),
+				}
+			}
+
+			// 增加該嚴重程度的計數
+			severityGroups[log.Severity]["count"] = severityGroups[log.Severity]["count"].(int) + 1
+
+			// 獲取主機映射
+			hostsMap := severityGroups[log.Severity]["hosts"].(map[string]map[string]interface{})
+
+			// 如果該主機不存在，創建它
+			if _, exists := hostsMap[log.ResourceName]; !exists {
+				hostsMap[log.ResourceName] = map[string]interface{}{
+					"resource_name": log.ResourceName,
+					"count":         0,
+					"metrics":       make([]map[string]interface{}, 0),
+				}
+			}
+
+			// 增加該主機的計數
+			hostsMap[log.ResourceName]["count"] = hostsMap[log.ResourceName]["count"].(int) + 1
+
+			// 添加指標信息
+			metricInfo := map[string]interface{}{
+				"metric_display_name": log.MetricRuleUID,
+				"triggered_value":     log.TriggeredValue,
+				"threshold":           log.Threshold,
+				"last_triggered_at":   time.Unix(log.LastTriggeredAt, 0).Format(time.RFC3339),
+			}
+
+			// 持續時間計算
+			if log.LastTriggeredAt > log.TriggeredAt {
+				duration := log.LastTriggeredAt - log.TriggeredAt
+				metricInfo["duration"] = duration
+			}
+
+			// 將指標添加到主機的指標列表中
+			metrics := hostsMap[log.ResourceName]["metrics"].([]map[string]interface{})
+			hostsMap[log.ResourceName]["metrics"] = append(metrics, metricInfo)
 		}
 
-		// 如果已解決，添加解決時間
-		if log.ResolvedAt != nil {
-			alertData["resolved_at"] = time.Unix(*log.ResolvedAt, 0).Format(time.RFC3339)
+		// 將嚴重程度分組轉換為數組
+		alertsBySeverity := make([]map[string]interface{}, 0, len(severityGroups))
+		for _, severityGroup := range severityGroups {
+			// 將主機映射轉換為數組
+			hostsMap := severityGroup["hosts"].(map[string]map[string]interface{})
+			hosts := make([]map[string]interface{}, 0, len(hostsMap))
+			for _, host := range hostsMap {
+				hosts = append(hosts, host)
+			}
+			severityGroup["hosts"] = hosts
+			alertsBySeverity = append(alertsBySeverity, severityGroup)
 		}
 
-		data["alerts"] = append(data["alerts"].([]map[string]interface{}), alertData)
+		// 按嚴重程度排序（Critical > Warning > Info）
+		sort.Slice(alertsBySeverity, func(i, j int) bool {
+			severityOrder := map[string]int{"Critical": 0, "Warning": 1, "Info": 2}
+			severityI := alertsBySeverity[i]["severity"].(string)
+			severityJ := alertsBySeverity[j]["severity"].(string)
+			return severityOrder[severityI] < severityOrder[severityJ]
+		})
+
+		data["alerts_by_severity"] = alertsBySeverity
+
+		// 為了向後兼容，保留舊的數據結構
+		alertsByHost := make([]map[string]interface{}, 0, len(logs))
+		for _, log := range logs {
+			alertData := map[string]interface{}{
+				"id":                  string(log.ID),
+				"triggered_at":        time.Unix(log.TriggeredAt, 0).Format(time.RFC3339),
+				"severity":            log.Severity,
+				"resource_name":       log.ResourceName,
+				"partition_name":      log.PartitionName,
+				"metric_display_name": log.MetricRuleUID,
+				"triggered_value":     log.TriggeredValue,
+				"threshold":           log.Threshold,
+			}
+			alertsByHost = append(alertsByHost, alertData)
+		}
+		data["alerts_by_host"] = alertsByHost
+
+	} else if notifyType == "resolved" {
+		// 處理恢復通知
+		data["resolved_alerts_count"] = len(logs)
+
+		// 按嚴重程度分組
+		severityGroups := make(map[string]map[string]interface{})
+		for _, log := range logs {
+			// 如果該嚴重程度不存在，創建它
+			if _, exists := severityGroups[log.Severity]; !exists {
+				severityGroups[log.Severity] = map[string]interface{}{
+					"severity": log.Severity,
+					"count":    0,
+					"hosts":    make(map[string]map[string]interface{}),
+				}
+			}
+
+			// 增加該嚴重程度的計數
+			severityGroups[log.Severity]["count"] = severityGroups[log.Severity]["count"].(int) + 1
+
+			// 獲取主機映射
+			hostsMap := severityGroups[log.Severity]["hosts"].(map[string]map[string]interface{})
+
+			// 如果該主機不存在，創建它
+			if _, exists := hostsMap[log.ResourceName]; !exists {
+				hostsMap[log.ResourceName] = map[string]interface{}{
+					"resource_name": log.ResourceName,
+					"count":         0,
+					"metrics":       make([]map[string]interface{}, 0),
+				}
+			}
+
+			// 增加該主機的計數
+			hostsMap[log.ResourceName]["count"] = hostsMap[log.ResourceName]["count"].(int) + 1
+
+			// 添加指標信息
+			metricInfo := map[string]interface{}{
+				"metric_display_name": log.MetricRuleUID,
+				"previous_value":      log.TriggeredValue,
+				"resolved_value":      log.ResolvedValue,
+				"threshold":           log.Threshold,
+				"resolved_at":         time.Unix(*log.ResolvedAt, 0).Format(time.RFC3339),
+			}
+
+			// 計算持續時間（如果有）
+			if log.ResolvedAt != nil && log.TriggeredAt > 0 {
+				duration := *log.ResolvedAt - log.TriggeredAt
+				if duration > 0 {
+					metricInfo["duration"] = duration
+				}
+			}
+
+			// 將指標添加到主機的指標列表中
+			metrics := hostsMap[log.ResourceName]["metrics"].([]map[string]interface{})
+			hostsMap[log.ResourceName]["metrics"] = append(metrics, metricInfo)
+		}
+
+		// 將嚴重程度分組轉換為數組
+		resolvedBySeverity := make([]map[string]interface{}, 0, len(severityGroups))
+		for _, severityGroup := range severityGroups {
+			// 將主機映射轉換為數組
+			hostsMap := severityGroup["hosts"].(map[string]map[string]interface{})
+			hosts := make([]map[string]interface{}, 0, len(hostsMap))
+			for _, host := range hostsMap {
+				hosts = append(hosts, host)
+			}
+			severityGroup["hosts"] = hosts
+			resolvedBySeverity = append(resolvedBySeverity, severityGroup)
+		}
+
+		// 按嚴重程度排序（Critical > Warning > Info）
+		sort.Slice(resolvedBySeverity, func(i, j int) bool {
+			severityOrder := map[string]int{"Critical": 0, "Warning": 1, "Info": 2}
+			severityI := resolvedBySeverity[i]["severity"].(string)
+			severityJ := resolvedBySeverity[j]["severity"].(string)
+			return severityOrder[severityI] < severityOrder[severityJ]
+		})
+
+		data["resolved_by_severity"] = resolvedBySeverity
+
+		// 為了向後兼容，保留舊的數據結構
+		resolvedAlertsByHost := make([]map[string]interface{}, 0, len(logs))
+		for _, log := range logs {
+			if log.ResolvedAt != nil {
+				alertData := map[string]interface{}{
+					"id":                  string(log.ID),
+					"resource_name":       log.ResourceName,
+					"partition_name":      log.PartitionName,
+					"metric_display_name": log.MetricRuleUID,
+					"previous_value":      log.TriggeredValue,
+					"resolved_value":      log.ResolvedValue,
+					"resolved_at":         time.Unix(*log.ResolvedAt, 0).Format(time.RFC3339),
+				}
+				resolvedAlertsByHost = append(resolvedAlertsByHost, alertData)
+			}
+		}
+		data["resolved_alerts_by_host"] = resolvedAlertsByHost
 	}
 
-	// 根據通知渠道選擇合適的模板格式
-	var titleTmpl, messageTmpl *template.Template
-	var err1, err2 error
-
-	switch contact.ChannelType {
-	case "email":
-		titleTmpl, err1 = template.New("title").Parse(tmpl.Title)
-		messageTmpl, err2 = template.New("message").Parse(tmpl.Message)
-	case "slack":
-		// Slack 使用 Markdown 格式
-		titleTmpl, err1 = template.New("title").Parse(tmpl.Title)
-		messageTmpl, err2 = template.New("message").Funcs(template.FuncMap{
-			"bold":  func(s string) string { return "*" + s + "*" },
-			"code":  func(s string) string { return "`" + s + "`" },
-			"quote": func(s string) string { return ">" + s },
-			"timestamp": func(t int64) string {
-				return fmt.Sprintf("<!date^%d^{date_num} {time_secs}|%s>", t, time.Unix(t, 0).Format(time.RFC3339))
-			},
-		}).Parse(tmpl.Message)
-	case "webhook":
-		// Webhook 使用純文本格式
-		titleTmpl, err1 = template.New("title").Parse(tmpl.Title)
-		messageTmpl, err2 = template.New("message").Parse(tmpl.Message)
-	default:
-		return "", "", fmt.Errorf("不支持的通知渠道類型: %s", contact.ChannelType)
+	// 透過 templates 模組渲染
+	message, err := s.templateService.RenderMessage(tmpl, data)
+	if err != nil {
+		return "", "", fmt.Errorf("渲染模板失敗: %w", err)
 	}
 
-	if err1 != nil {
-		return "", "", fmt.Errorf("解析標題模板失敗: %w", err1)
-	}
-	if err2 != nil {
-		return "", "", fmt.Errorf("解析消息模板失敗: %w", err2)
-	}
-
-	// 渲染標題
-	var titleBuf bytes.Buffer
-	if err := titleTmpl.Execute(&titleBuf, data); err != nil {
-		return "", "", fmt.Errorf("渲染標題失敗: %w", err)
-	}
-
-	// 渲染消息內容
-	var messageBuf bytes.Buffer
-	if err := messageTmpl.Execute(&messageBuf, data); err != nil {
-		return "", "", fmt.Errorf("渲染消息內容失敗: %w", err)
-	}
-
-	return titleBuf.String(), messageBuf.String(), nil
+	return tmpl.Title, message, nil
 }
 
-// sendNotification 發送通知
+func GetFormatByType(contactType string) string {
+	switch contactType {
+	case "email":
+		return "html"
+	case "slack", "discord", "teams", "webex", "line":
+		return "markdown"
+	case "webhook":
+		return "json"
+	default:
+		return "text"
+	}
+}
+
+// 發送通知
 func (s *Service) sendNotification(contact *models.Contact, title, message string) error {
-	// 根據聯絡人類型選擇不同的通知方式
-	switch contact.ChannelType {
-	case "webhook":
-		return s.sendWebhook(contact, title, message)
-	case "email":
-		return s.sendEmail(contact, title, message)
-	case "slack":
-		return s.sendSlack(contact, title, message)
-	default:
-		return fmt.Errorf("不支持的通知渠道類型: %s", contact.ChannelType)
+
+	config := map[string]string{
+		"title":   title,
+		"message": message,
 	}
-}
 
-// sendWebhook 發送 Webhook 通知
-func (s *Service) sendWebhook(contact *models.Contact, title, message string) error {
-	// 這裡應該實現 Webhook 通知的邏輯
-	// 例如使用 HTTP 客戶端發送 POST 請求
-	s.logger.Info("模擬發送 Webhook 通知", zap.String("contact_id", string(contact.ID)), zap.String("title", title))
-	return nil
-}
+	return s.notifyService.Send(common.NotifySetting{
+		Type:   contact.ChannelType,
+		Config: config,
+	})
 
-// sendEmail 發送郵件通知
-func (s *Service) sendEmail(contact *models.Contact, title, message string) error {
-	// 這裡應該實現郵件通知的邏輯
-	// 例如使用 SMTP 客戶端發送郵件
-	s.logger.Info("模擬發送郵件通知", zap.String("contact_id", string(contact.ID)), zap.String("title", title))
-	return nil
-}
-
-// sendSlack 發送 Slack 通知
-func (s *Service) sendSlack(contact *models.Contact, title, message string) error {
-	// 這裡應該實現 Slack 通知的邏輯
-	// 例如使用 Slack API 發送消息
-	s.logger.Info("模擬發送 Slack 通知", zap.String("contact_id", string(contact.ID)), zap.String("title", title))
-	return nil
 }
 
 // 配置常量
 const (
-	maxRetry          = 3   // 最大重試次數
-	retryDelay        = 300 // 重試延遲時間（秒）
-	notifyPendingTime = 600 // 通知等待時間（秒）
+	DefaultMaxRetry    = 3   // 最大重試次數
+	DefaultRetryDelay  = 300 // 重試延遲時間（秒）
+	DefaultPendingTime = 600 // 通知等待時間（秒）
 )
+
+// HandleNotifyPendingTime 處理通知等待時間
+func (s *Service) HandleNotifyPendingTime(triggeredLog *models.TriggeredLog) error {
+	// 檢查是否需要等待
+	currentTime := time.Now().Unix()
+	pendingTime := DefaultPendingTime
+
+	// 使用配置中的等待時間
+	if s.config.NotifyPeriod > 0 {
+		pendingTime = s.config.NotifyPeriod
+	}
+
+	// 如果觸發時間 + 等待時間 > 當前時間，則不需要發送通知
+	if triggeredLog.TriggeredAt+int64(pendingTime) > currentTime {
+		return nil
+	}
+
+	// 更新通知狀態為待發送
+	return s.mysql.UpdateTriggeredLogNotifyState(triggeredLog.ID, NotifyStatePending)
+}
 
 // retryFailedNotifications 重試失敗的通知
 func (s *Service) retryFailedNotifications() error {
@@ -333,6 +537,11 @@ func (s *Service) retryFailedNotifications() error {
 		return nil
 	}
 
+	// 獲取配置
+	maxRetry := DefaultMaxRetry
+	retryDelay := DefaultRetryDelay
+
+	// 使用聯絡人的重試次數
 	for _, notifyLog := range failedLogs {
 		// 檢查是否超過最大重試次數
 		if notifyLog.RetryCounter >= maxRetry {
@@ -340,7 +549,14 @@ func (s *Service) retryFailedNotifications() error {
 				zap.String("notify_log_id", string(notifyLog.ID)),
 				zap.Int("retry_counter", notifyLog.RetryCounter))
 
-			notifyLog.State = "final_failed"
+			notifyLog.State = NotifyStateFailed
+
+			// 創建錯誤訊息
+			errorMessages := make(common.JSONMap)
+			errorMessages["error"] = fmt.Sprintf("超過最大重試次數 %d", maxRetry)
+			errorMessages["time"] = fmt.Sprintf("%d", time.Now().Unix())
+			notifyLog.ErrorMessages = &errorMessages
+
 			if err := s.mysql.UpdateNotifyLog(notifyLog); err != nil {
 				s.logger.Error("更新通知日誌狀態失敗", zap.Error(err))
 			}
@@ -349,7 +565,7 @@ func (s *Service) retryFailedNotifications() error {
 
 		// 檢查是否達到重試延遲時間
 		currentTime := time.Now().Unix()
-		if notifyLog.LastRetryAt != nil && currentTime-*notifyLog.LastRetryAt < retryDelay {
+		if notifyLog.LastRetryAt != nil && currentTime-*notifyLog.LastRetryAt < int64(retryDelay) {
 			continue
 		}
 
@@ -363,28 +579,11 @@ func (s *Service) retryFailedNotifications() error {
 		// 重新渲染模板
 		var triggeredLogs []models.TriggeredLog
 		for _, logID := range notifyLog.TriggeredLogIDs {
-			idValue, exists := logID["id"]
-			if !exists {
+			id, ok := logID["id"].(string)
+			if !ok {
 				continue
 			}
-
-			// 嘗試將 interface{} 轉換為字符串
-			var idStr string
-			switch v := idValue.(type) {
-			case string:
-				idStr = v
-			case []byte:
-				idStr = string(v)
-			case json.Number:
-				idStr = string(v)
-			default:
-				s.logger.Error("無效的 ID 類型",
-					zap.String("notify_log_id", string(notifyLog.ID)),
-					zap.Any("id_type", fmt.Sprintf("%T", idValue)))
-				continue
-			}
-
-			log, err := s.mysql.GetTriggeredLog([]byte(idStr))
+			log, err := s.mysql.GetTriggeredLog([]byte(id))
 			if err != nil {
 				s.logger.Error("獲取觸發日誌失敗", zap.Error(err))
 				continue
@@ -394,7 +593,13 @@ func (s *Service) retryFailedNotifications() error {
 			}
 		}
 
-		title, message, err := s.renderTemplate(contact, triggeredLogs)
+		// 判斷通知類型
+		notifyType := "alerting"
+		if notifyLog.State == NotifyStateSolved {
+			notifyType = "resolved"
+		}
+
+		title, message, err := s.renderTemplate(contact, triggeredLogs, notifyType)
 		if err != nil {
 			s.logger.Error("重試時渲染模板失敗", zap.Error(err))
 			continue
@@ -414,61 +619,26 @@ func (s *Service) retryFailedNotifications() error {
 				zap.String("notify_log_id", string(notifyLog.ID)),
 				zap.Int("retry_counter", notifyLog.RetryCounter))
 
-			notifyLog.State = "failed"
-			errorMsg := fmt.Sprintf("重試發送通知失敗: %s", err.Error())
-			notifyLog.ErrorMessage = &errorMsg
+			notifyLog.State = NotifyStateFailed
+
+			// 創建錯誤訊息
+			errorMessages := make(common.JSONMap)
+			errorMessages["error"] = fmt.Sprintf("重試發送通知失敗: %s", err.Error())
+			errorMessages["retry"] = fmt.Sprintf("%d", notifyLog.RetryCounter)
+			errorMessages["time"] = fmt.Sprintf("%d", time.Now().Unix())
+			notifyLog.ErrorMessages = &errorMessages
 		} else {
 			s.logger.Info("重試發送通知成功",
 				zap.String("notify_log_id", string(notifyLog.ID)),
 				zap.Int("retry_counter", notifyLog.RetryCounter))
 
-			notifyLog.State = "sent"
+			notifyLog.State = NotifyStateSent
 			notifyLog.SentAt = &retryTime
 		}
 
 		if err := s.mysql.UpdateNotifyLog(notifyLog); err != nil {
 			s.logger.Error("更新通知日誌失敗", zap.Error(err))
 		}
-	}
-
-	return nil
-}
-
-// HandleNotifyPendingTime 處理延遲通知機制
-func (s *Service) HandleNotifyPendingTime(triggeredLog *models.TriggeredLog) error {
-	// 如果沒有設置延遲時間，直接返回
-	if notifyPendingTime <= 0 {
-		return nil
-	}
-
-	currentTime := time.Now().Unix()
-	pendingEndTime := triggeredLog.TriggeredAt + notifyPendingTime
-
-	// 如果還在等待期內
-	if currentTime < pendingEndTime {
-		// 檢查告警是否已恢復
-		ruleState, err := s.mysql.GetRuleState(triggeredLog.RuleID)
-		if err != nil {
-			return fmt.Errorf("獲取規則狀態失敗: %w", err)
-		}
-
-		// 如果告警已恢復，標記為忽略
-		if ruleState != nil && ruleState.State == "resolved" {
-			triggeredLog.NotifyState = "ignored"
-			if err := s.mysql.UpdateTriggeredLog(*triggeredLog); err != nil {
-				return fmt.Errorf("更新觸發日誌狀態失敗: %w", err)
-			}
-			return nil
-		}
-
-		// 還在等待期內，且告警未恢復，保持等待
-		return nil
-	}
-
-	// 延遲期結束，將狀態改為待通知
-	triggeredLog.NotifyState = "pending"
-	if err := s.mysql.UpdateTriggeredLog(*triggeredLog); err != nil {
-		return fmt.Errorf("更新觸發日誌狀態失敗: %w", err)
 	}
 
 	return nil

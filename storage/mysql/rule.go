@@ -1,145 +1,226 @@
 package mysql
 
 import (
-	"fmt"
-
+	"github.com/detect-viz/shared-lib/apierrors"
 	"github.com/detect-viz/shared-lib/models"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// GetMetricRule 獲取指標規則定義
-func (c *Client) GetMetricRule(id int64) (models.MetricRule, error) {
-	var rule models.MetricRule
-	err := c.db.First(&rule, id).Error
-	return rule, err
-}
-
-// GetAlertRuleDetails 獲取告警規則詳情
-func (c *Client) GetAlertRuleDetails(ruleID int64) ([]models.AlertRuleDetail, error) {
-	var details []models.AlertRuleDetail
-	err := c.db.Where("alert_rule_id = ?", ruleID).Find(&details).Error
-	return details, err
-}
-
-// GetRules 獲取所有告警規則，並按 realm 分組
-func (c *Client) GetRules() (map[string][]models.Rule, error) {
-	var rules []models.Rule
-
-	err := c.db.Preload(clause.Associations).
-		Where("enabled = ? AND deleted_at IS NULL", true).
-		Find(&rules).Error
-
-	if err != nil {
-		return nil, err
-	}
-
-	// 按 realm 分組
-	rulesByRealm := make(map[string][]models.Rule)
-	for _, rule := range rules {
-		rulesByRealm[rule.RealmName] = append(rulesByRealm[rule.RealmName], rule)
-	}
-
-	return rulesByRealm, nil
-}
-
-// 獲取資源群組名稱
-func (c *Client) GetResourceGroupName(id int64) (string, error) {
-	var name string
-	return name, c.db.Table("resource_groups").Where("id = ?", id).Select("name").Scan(&name).Error
-}
-
-// CreateOrUpdateAlertRule 創建或更新告警規則
-func (c *Client) CreateOrUpdateAlertRule(rule *models.Rule) error {
-	return c.db.Save(rule).Error
-}
-
-// CreateOrUpdateAlertContact 創建或更新通知管道
-func (c *Client) CreateOrUpdateAlertContact(contact *models.Contact) error {
-	return c.db.Save(contact).Error
-}
-
-// 獲取規則的聯絡人列表
-func (c *Client) GetRuleContacts(ruleID int64) ([]models.Contact, error) {
-	var contactIDs []int64
-	var contacts []models.Contact
-
-	// 1. 獲取聯絡人 IDs
-	err := c.db.Model(&models.AlertRuleContact{}).
-		Where("alert_rule_id = ?", ruleID).
-		Pluck("alert_contact_id", &contactIDs).Error
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. 獲取聯絡人詳情並預加載 Severities
-	err = c.db.Model(&models.Contact{}).
-		Preload(clause.Associations).
-		Where("id IN (?)", contactIDs).
-		Find(&contacts).Error
-
-	for i, contact := range contacts {
-		var lvl []models.AlertContactSeverity
-		err = c.db.Model(&models.AlertContactSeverity{}).
-			Where("alert_contact_id = ?", contact.ID).
-			Find(&lvl).Error
-		if err != nil {
-			return nil, err
+// * 創建規則 + Alert State
+func (c *Client) CreateRule(rule *models.Rule) (*models.Rule, error) {
+	rule.ID = []byte(uuid.New().String())
+	err := c.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(rule).Error; err != nil {
+			return ParseDBError(err)
 		}
 
-		contacts[i].Severities = lvl
-	}
+		//* 檢查 RuleState 是否存在
+		var exists bool
+		err := tx.Model(&models.RuleState{}).
+			Where("rule_id = ?", rule.ID).
+			Select("count(*) > 0").
+			Find(&exists).Error
+		if err != nil {
+			return ParseDBError(err)
+		}
 
-	return contacts, err
-}
+		if !exists {
+			ruleState := models.RuleState{
+				RuleID: rule.ID,
+			}
+			if err := tx.Create(&ruleState).Error; err != nil {
+				return ParseDBError(err)
+			}
+		}
 
-// GetLabelByRuleID 獲取規則的標籤
-func (c *Client) GetRuleLabels(ruleID int64) (map[string]string, error) {
-	var labelIDs []int64
-	err := c.db.Model(&models.AlertRuleLabel{}).Where("rule_id = ?", ruleID).Pluck("label_id", &labelIDs).Error
+		return nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
-	var labels []models.Label
-	err = c.db.Where("id IN (?)", labelIDs).Find(&labels).Error
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]string)
-	for _, label := range labels {
-		result[label.KeyName] = label.Value.String()
-	}
-	return result, nil
+
+	return rule, nil
 }
 
-// CreateRule 創建抑制規則
-func (c *Client) CreateRule(rule *models.Rule) error {
-	return c.db.Create(rule).Error
-}
-
-// GetRule 獲取抑制規則
-func (c *Client) GetRule(id int64) (*models.Rule, error) {
+// 獲取規則
+func (c *Client) GetRule(id []byte) (*models.Rule, error) {
 	var rule models.Rule
-	if err := c.db.Preload("AlertRuleDetails").First(&rule, id).Error; err != nil {
-		return nil, fmt.Errorf("獲取抑制規則失敗: %w", err)
+	err := c.db.Preload(clause.Associations).First(&rule, "id = ?", id).Error
+	if err != nil {
+		return nil, ParseDBError(err)
 	}
 	return &rule, nil
 }
 
-// ListRules 獲取抑制規則列表
-func (c *Client) ListRules(realm string) ([]models.Rule, error) {
+// 獲取規則列表
+func (c *Client) ListRules(realm string, cursor int64, limit int) ([]models.Rule, int64, error) {
 	var rules []models.Rule
-	if err := c.db.Preload("AlertRuleDetails").Where("realm_name = ?", realm).Find(&rules).Error; err != nil {
-		return nil, fmt.Errorf("獲取抑制規則列表失敗: %w", err)
+	// 只回傳 UI 需要的欄位
+	query := c.db.Model(&models.Rule{}).
+		Where("realm_name = ?", realm)
+
+	if cursor > 0 {
+		query = query.Where("created_at > ?", cursor)
 	}
+
+	err := query.Order("created_at ASC").
+		Limit(limit).
+		Find(&rules).Error
+
+	if err != nil {
+		return nil, 0, ParseDBError(err)
+	}
+
+	// 計算 next_cursor
+	nextCursor := int64(-1)
+	if len(rules) > 0 && len(rules) >= limit {
+		var lastCreatedAt int64
+		c.db.Model(&models.Rule{}).
+			Where("id = ?", rules[len(rules)-1].ID).
+			Pluck("created_at", &lastCreatedAt)
+		nextCursor = lastCreatedAt
+	}
+
+	return rules, nextCursor, nil
+}
+
+// 更新規則
+func (c *Client) UpdateRule(rule *models.Rule) (*models.Rule, error) {
+	err := c.db.Transaction(func(tx *gorm.DB) error {
+		// 1. 檢查規則是否存在
+		var exists bool
+		err := tx.Model(&models.Rule{}).
+			Where("id = ?", rule.ID).
+			Select("count(*) > 0").
+			Find(&exists).Error
+		if err != nil {
+			return ParseDBError(err)
+		}
+
+		if !exists {
+			return apierrors.ErrNotFound
+		}
+
+		// 2. 更新 Rule 本身（排除關聯）
+		if err := tx.Omit("Contacts").Model(&models.Rule{}).
+			Where("id = ?", rule.ID).
+			Updates(map[string]interface{}{
+				"target_id":       rule.TargetID,
+				"metric_rule_uid": rule.MetricRuleUID,
+				"create_type":     rule.CreateType,
+				"auto_apply":      rule.AutoApply,
+				"enabled":         rule.Enabled,
+				"info_threshold":  rule.InfoThreshold,
+				"warn_threshold":  rule.WarnThreshold,
+				"crit_threshold":  rule.CritThreshold,
+				"times":           rule.Times,
+				"duration":        rule.Duration,
+				"silence_period":  rule.SilencePeriod,
+			}).Error; err != nil {
+			return ParseDBError(err)
+		}
+
+		// 3. 更新 Contacts 關聯
+		if err := tx.Model(rule).Association("Contacts").Replace(rule.Contacts); err != nil {
+			return ParseDBError(err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// 重新查詢最新的 Rule，確保返回最新數據
+	return c.GetRule(rule.ID)
+}
+
+// 刪除規則
+func (c *Client) DeleteRule(id []byte) error {
+	result := c.db.Delete(&models.Rule{}, "id = ?", id)
+	if result.RowsAffected == 0 {
+		return apierrors.ErrNotFound
+	}
+	if result.Error != nil {
+		return ParseDBError(result.Error)
+	}
+	return nil
+}
+
+// 獲取自動匹配的規則
+func (c *Client) GetAutoApplyRulesByMetricRuleUIDs(realm string, metricRuleUIDs []string) ([]models.Rule, error) {
+	var rules []models.Rule
+
+	err := c.db.Where("realm_name = ? AND metric_rule_uid IN ? AND enabled = ? AND auto_apply = ?", realm, metricRuleUIDs, true, true).Find(&rules).Error
+
+	if err != nil {
+		return nil, ParseDBError(err)
+	}
+
 	return rules, nil
 }
 
-// UpdateRule 更新抑制規則
-func (c *Client) UpdateRule(rule *models.Rule) error {
-	return c.db.Model(rule).Updates(rule).Error
+// 獲取與特定 target 相關的規則
+func (c *Client) GetRulesByTarget(realm, resourceName, partitionName string) ([]models.Rule, error) {
+	var rules []models.Rule
+
+	// 首先獲取符合條件的 target
+	var target models.Target
+	err := c.db.Where("realm_name = ? AND resource_name = ? AND partition_name = ?",
+		realm, resourceName, partitionName).First(&target).Error
+
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return []models.Rule{}, nil
+		}
+		return nil, ParseDBError(err)
+	}
+
+	// 然後獲取與該 target 相關的規則
+	err = c.db.Preload(clause.Associations).
+		Where("target_id = ? AND enabled = ?", target.ID, true).
+		Find(&rules).Error
+
+	if err != nil {
+		return nil, ParseDBError(err)
+	}
+
+	return rules, nil
 }
 
-// DeleteRule 刪除抑制規則
-func (c *Client) DeleteRule(id int64) error {
-	return c.db.Delete(&models.Rule{}, id).Error
+func (c *Client) CreateRules(rules []models.Rule) error {
+	// 為每個規則生成 ID
+	for i := range rules {
+		rules[i].ID = []byte(uuid.New().String())
+	}
+
+	err := c.db.Transaction(func(tx *gorm.DB) error {
+		// 創建規則
+		if err := tx.Create(&rules).Error; err != nil {
+			return ParseDBError(err)
+		}
+
+		// 為每個規則創建 RuleState
+		for _, rule := range rules {
+			ruleState := models.RuleState{
+				RuleID: rule.ID,
+			}
+			if err := tx.Create(&ruleState).Error; err != nil {
+				return ParseDBError(err)
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

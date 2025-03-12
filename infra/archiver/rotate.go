@@ -10,32 +10,31 @@ import (
 
 // RotateTask 管理日誌輪轉
 type RotateTask struct {
-	service *Service
+	service *ServiceImpl
 }
 
 // NewRotateTask 建立 RotateTask
-func NewRotateTask(service *Service) *RotateTask {
+func NewRotateTask(service *ServiceImpl) *RotateTask {
 	return &RotateTask{service: service}
 }
 
-// 註冊輪轉任務
-func (r *RotateTask) RegisterRotateTask(archiverTask common.RotateTask) error {
-	task := archiverTask.Task
+// RegisterRotateTask 註冊輪轉任務
+func (r *RotateTask) RegisterRotateTask(task common.RotateTask) error {
 	taskSetting := common.Task{
 		Enabled:     true,
-		Name:        task.Name,
-		Timezone:    task.Timezone,
-		Description: task.Description,
-		RetryCount:  task.RetryCount,
-		RetryDelay:  task.RetryDelay,
-		Duration:    task.Duration,
-		Spec:        task.Spec,
-		Type:        task.Type,
+		Name:        task.Task.Name,
+		Timezone:    task.Task.Timezone,
+		Description: task.Task.Description,
+		RetryCount:  task.Task.RetryCount,
+		RetryDelay:  task.Task.RetryDelay,
+		Duration:    task.Task.Duration,
+		Spec:        task.Task.Spec,
+		Type:        task.Task.Type,
 		ExecFunc: func() error {
-			return r.ExecuteRotateTask(archiverTask)
+			return r.ExecuteRotateTask(task)
 		},
 	}
-	err := r.service.scheduler.RegisterTask(taskSetting)
+	err := r.service.SchedulerService.RegisterTask(taskSetting)
 	if err != nil {
 		return fmt.Errorf("註冊輪轉任務失敗: %w", err)
 	}
