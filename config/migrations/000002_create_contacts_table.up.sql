@@ -5,6 +5,7 @@ CREATE TABLE `contacts` (
   `name` varchar(100) NOT NULL,
   `enabled` tinyint(1) DEFAULT '1',
   `send_resolved` tinyint(1) DEFAULT '1',
+  `auto_apply` tinyint(1) DEFAULT '0',
   `max_retry` int DEFAULT '3',
   `retry_delay` varchar(10) NOT NULL DEFAULT '5m',
   `severities` set('info', 'warn', 'crit') NOT NULL,
@@ -13,7 +14,7 @@ CREATE TABLE `contacts` (
   `updated_by` varchar(36) DEFAULT NULL,
   `created_at` bigint unsigned DEFAULT NULL,
   `updated_at` bigint unsigned DEFAULT NULL,
-  `deleted_at` bigint unsigned DEFAULT NULL,
+  `deleted_at` DATETIME DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_contacts_realm` (`realm_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

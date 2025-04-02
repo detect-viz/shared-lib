@@ -16,7 +16,7 @@ CREATE TABLE `rules` (
   `updated_by` varchar(36) DEFAULT NULL,
   `created_at` bigint unsigned DEFAULT NULL,
   `updated_at` bigint unsigned DEFAULT NULL,
-  `deleted_at` bigint unsigned DEFAULT NULL,
+  `deleted_at` DATETIME DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_rule` (`realm_name`,`metric_rule_uid`,`target_id`),
   KEY `fk_realms_rules` (`realm_name`),

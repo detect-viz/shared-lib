@@ -10,9 +10,9 @@ import "github.com/detect-viz/shared-lib/models/common"
 // * 監控對象可以有不同的發送間隔，比如 10 秒、1 分鐘、5 分鐘等
 
 type Target struct {
-	ID                 []byte `json:"id"`
-	RealmName          string `json:"realm_name"`
-	Status             string `json:"status"`
+	ID        []byte `json:"id"`
+	RealmName string `json:"realm_name"`
+
 	DatasourceName     string `json:"datasource_name"`
 	Category           string `json:"category"`
 	CollectionInterval int    `json:"collection_interval"`

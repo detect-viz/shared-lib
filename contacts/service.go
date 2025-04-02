@@ -2,6 +2,7 @@ package contacts
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -22,9 +23,6 @@ var ContactSet = wire.NewSet(
 	NewService,
 	wire.Bind(new(Service), new(*serviceImpl)),
 )
-
-// 聯絡人變更回調函數類型
-type ContactChangeCallback func(contact models.Contact, operation string)
 
 // Service 通知管道服務
 type serviceImpl struct {
@@ -51,8 +49,9 @@ func (s *serviceImpl) SetContactChangeCallback(callback ContactChangeCallback) {
 }
 
 // 創建通知管道
-func (s *serviceImpl) Create(contact *models.Contact) (*models.Contact, error) {
-	createdContact, err := s.mysql.CreateContact(contact)
+func (s *serviceImpl) Create(realm string, contactResp *models.ContactResponse) (*models.ContactResponse, error) {
+	contact := s.FromResponse(*contactResp, realm)
+	createdContact, err := s.mysql.CreateContact(&contact)
 	if err != nil {
 		return nil, err
 	}
@@ -62,22 +61,56 @@ func (s *serviceImpl) Create(contact *models.Contact) (*models.Contact, error) {
 		s.onContactChangeFunc(*createdContact, "create")
 	}
 
-	return createdContact, nil
+	response := s.ToResponse(*createdContact)
+	return &response, nil
 }
 
 // 獲取通知管道
-func (s *serviceImpl) Get(id []byte) (*models.Contact, error) {
-	return s.mysql.GetContact(id)
+func (s *serviceImpl) Get(id string) (*models.ContactResponse, error) {
+	// 將 ID 從 string 轉換為 []byte
+	idBytes, err := uuid.Parse(id)
+	if err != nil {
+		return nil, apierrors.ErrInvalidID
+	}
+
+	contact, err := s.mysql.GetContact(idBytes[:])
+	if err != nil {
+		return nil, err
+	}
+
+	if contact.ChannelType == "email" || contact.ChannelType == "line" {
+		cfg, err := s.GetConfig(context.Background(), contact.ChannelType)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("cfg: %v\n", cfg)
+		contact.Config = cfg
+	}
+
+	response := s.ToResponse(*contact)
+	return &response, nil
 }
 
 // 獲取通知管道列表
-func (s *serviceImpl) List(realm string, cursor int64, limit int) ([]models.Contact, int64, error) {
-	return s.mysql.ListContacts(realm, cursor, limit)
+func (s *serviceImpl) List(realm string, cursor int64, limit int) ([]models.ContactResponse, int64, error) {
+	contacts, nextCursor, err := s.mysql.ListContacts(realm, cursor, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// 將 Contact 轉換為 ContactResponse
+	contactResponses := make([]models.ContactResponse, len(contacts))
+	for i, contact := range contacts {
+		contactResponses[i] = s.ToResponse(contact)
+	}
+
+	return contactResponses, nextCursor, nil
 }
 
 // 更新通知管道
-func (s *serviceImpl) Update(contact *models.Contact) (*models.Contact, error) {
-	updatedContact, err := s.mysql.UpdateContact(contact)
+func (s *serviceImpl) Update(realm string, contactResp *models.ContactResponse) (*models.ContactResponse, error) {
+	contact := s.FromResponse(*contactResp, realm)
+	updatedContact, err := s.mysql.UpdateContact(&contact)
 	if err != nil {
 		return nil, err
 	}
@@ -87,19 +120,26 @@ func (s *serviceImpl) Update(contact *models.Contact) (*models.Contact, error) {
 		s.onContactChangeFunc(*updatedContact, "update")
 	}
 
-	return updatedContact, nil
+	response := s.ToResponse(*updatedContact)
+	return &response, nil
 }
 
 // 刪除通知管道
-func (s *serviceImpl) Delete(id []byte) error {
+func (s *serviceImpl) Delete(id string) error {
+	// 將 ID 從 string 轉換為 []byte
+	idBytes, err := uuid.Parse(id)
+	if err != nil {
+		return apierrors.ErrInvalidID
+	}
+
 	// 獲取聯絡人，以便在刪除後觸發回調
-	contact, err := s.mysql.GetContact(id)
+	contact, err := s.mysql.GetContact(idBytes[:])
 	if err != nil {
 		return err
 	}
 
 	//* 檢查 contact_id 是否仍被使用
-	used, err := s.mysql.IsUsedByRules(id)
+	used, err := s.mysql.IsUsedByRules(idBytes[:])
 	if err != nil {
 		return apierrors.ErrInternalError
 	}
@@ -108,7 +148,7 @@ func (s *serviceImpl) Delete(id []byte) error {
 	}
 
 	// 刪除聯絡人
-	if err := s.mysql.DeleteContact(id); err != nil {
+	if err := s.mysql.DeleteContact(idBytes[:]); err != nil {
 		return err
 	}
 
@@ -121,7 +161,8 @@ func (s *serviceImpl) Delete(id []byte) error {
 }
 
 // 測試通知
-func (s *serviceImpl) NotifyTest(contact models.Contact) error {
+func (s *serviceImpl) NotifyTest(realm string, contactResp *models.ContactResponse) error {
+	contact := s.FromResponse(*contactResp, realm)
 	notify := common.NotifySetting{
 		Type:   contact.ChannelType,
 		Config: contact.Config,
@@ -138,13 +179,36 @@ func (s *serviceImpl) NotifyTest(contact models.Contact) error {
 }
 
 // 檢查通知管道是否被規則使用
-func (s *serviceImpl) IsUsedByRules(id []byte) (bool, error) {
-	return s.mysql.IsUsedByRules(id)
+func (s *serviceImpl) IsUsedByRules(id string) (bool, error) {
+	// 將 ID 從 string 轉換為 []byte
+	idBytes, err := uuid.Parse(id)
+	if err != nil {
+		return false, apierrors.ErrInvalidID
+	}
+
+	return s.mysql.IsUsedByRules(idBytes[:])
 }
 
 // 獲取規則的通知管道
-func (s *serviceImpl) GetContactsByRuleID(ruleID []byte) ([]models.Contact, error) {
-	return s.mysql.GetContactsByRuleID(ruleID)
+func (s *serviceImpl) GetContactsByRuleID(ruleID string) ([]models.ContactResponse, error) {
+	// 將 ID 從 string 轉換為 []byte
+	idBytes, err := uuid.Parse(ruleID)
+	if err != nil {
+		return nil, apierrors.ErrInvalidID
+	}
+
+	contacts, err := s.mysql.GetContactsByRuleID(idBytes[:])
+	if err != nil {
+		return nil, err
+	}
+
+	// 將 Contact 轉換為 ContactResponse
+	contactResponses := make([]models.ContactResponse, len(contacts))
+	for i, contact := range contacts {
+		contactResponses[i] = s.ToResponse(contact)
+	}
+
+	return contactResponses, nil
 }
 
 // 獲取所有通知管道方法
@@ -161,7 +225,7 @@ func (s *serviceImpl) GetConfig(ctx context.Context, notifyType string) (map[str
 	}
 
 	configKey := fmt.Sprintf("%s_config", notifyType)
-
+	s.logger.Info("GetConfig", zap.String("configKey", configKey))
 	configJSON, err := s.keycloakClient.GetRealmAttribute(ctx, configKey)
 	if err != nil {
 		// 如果是找不到屬性的錯誤，返回空配置而不是錯誤
@@ -200,7 +264,7 @@ func (s *serviceImpl) GetAllConfigs(ctx context.Context) (map[string]map[string]
 	return configs, nil
 }
 
-// 獲取所有通知管道選項
+// 獲取通知選項
 func (s *serviceImpl) GetNotifyOptions(ctx context.Context, realm string) (map[string]map[string][]string, error) {
 	// 檢查 keycloakClient 是否為 nil
 	if s.keycloakClient == nil {
@@ -289,14 +353,16 @@ func getNotifyOptions(tenantConfigs map[string]map[string]string) map[string]map
 
 // 設置 Keycloak 客戶端
 func (s *serviceImpl) SetKeycloakClient(client keycloak.KeycloakClient) error {
-	// 將 client 轉換為 *keycloak.Client
-	kc, ok := client.(*keycloak.Client)
-	if !ok {
-		return fmt.Errorf("invalid keycloak client type")
+	if client == nil {
+		return fmt.Errorf("keycloak client is nil")
 	}
 
-	s.keycloakClient = kc
-	return nil
+	if kc, ok := client.(*keycloak.Client); ok {
+		s.keycloakClient = kc
+		return nil
+	}
+
+	return fmt.Errorf("invalid keycloak client type")
 }
 
 func (s *serviceImpl) ToResponse(contact models.Contact) models.ContactResponse {
@@ -315,12 +381,12 @@ func (s *serviceImpl) ToResponse(contact models.Contact) models.ContactResponse 
 	}
 
 	return models.ContactResponse{
-		ID:           string(contact.ID),
-		RealmName:    contact.RealmName,
+		ID:           hex.EncodeToString(contact.ID),
 		Name:         contact.Name,
 		ChannelType:  contact.ChannelType,
 		Enabled:      contact.Enabled,
 		SendResolved: contact.SendResolved,
+		AutoApply:    contact.AutoApply,
 		MaxRetry:     contact.MaxRetry,
 		RetryDelay:   contact.RetryDelay,
 		Config:       configMap,
@@ -329,7 +395,7 @@ func (s *serviceImpl) ToResponse(contact models.Contact) models.ContactResponse 
 }
 
 // 將 ContactResponse 轉換為 Contact
-func (s *serviceImpl) FromResponse(resp models.ContactResponse) models.Contact {
+func (s *serviceImpl) FromResponse(resp models.ContactResponse, realm string) models.Contact {
 	// 將 ID 從 string 轉換為 []byte
 	var id []byte
 	if resp.ID != "" {
@@ -350,11 +416,12 @@ func (s *serviceImpl) FromResponse(resp models.ContactResponse) models.Contact {
 	// 創建 Contact 對象
 	contact := models.Contact{
 		ID:           id,
-		RealmName:    resp.RealmName,
+		RealmName:    realm,
 		Name:         resp.Name,
 		ChannelType:  resp.ChannelType,
 		Enabled:      resp.Enabled,
 		SendResolved: resp.SendResolved,
+		AutoApply:    resp.AutoApply,
 		MaxRetry:     resp.MaxRetry,
 		RetryDelay:   resp.RetryDelay,
 		Config:       config,

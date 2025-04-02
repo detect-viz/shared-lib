@@ -101,7 +101,7 @@ shared-lib/
 
 ## 🚀 **完整架構**
 
-```
+```bash
 shared-lib/
 ├── alert/              # 🟥 高層聚合介面，統一管理 rules/mutes/notifier/templates/contacts/labels
 ├── rules/              # 🟦 告警規則管理

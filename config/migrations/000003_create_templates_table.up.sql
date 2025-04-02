@@ -11,7 +11,7 @@ CREATE TABLE `templates` (
   `updated_by` varchar(36) DEFAULT NULL,
   `created_at` bigint unsigned DEFAULT NULL,
   `updated_at` bigint unsigned DEFAULT NULL,
-  `deleted_at` bigint unsigned DEFAULT NULL,
+  `deleted_at` DATETIME DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `idx_realm_name_name` (`realm_name`, `name`),
   KEY `idx_realm_name` (`realm_name`),

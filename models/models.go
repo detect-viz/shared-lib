@@ -20,21 +20,24 @@ type (
 	// DTO 相關
 	LabelDTO = dto.LabelDTO
 
-	// Alert 相關
-	Rule                = alert.Rule
-	Target              = alert.Target
-	MetricRule          = alert.MetricRule
-	Template            = alert.Template
+	// Response 相關
 	MetricRuleOverview  = alert.MetricRuleOverview
 	RuleOverview        = alert.RuleOverview
 	RuleResponse        = alert.RuleResponse
 	RuleContactResponse = alert.RuleContactResponse
 	ContactResponse     = alert.ContactResponse
-	RuleState           = alert.RuleState
-	Contact             = alert.Contact
-	RuleContact         = alert.RuleContact
-	TriggeredLog        = alert.TriggeredLog
-	NotifyLog           = alert.NotifyLog
+
+	// Alert 相關
+	Rule               = alert.Rule
+	Target             = alert.Target
+	MetricRule         = alert.MetricRule
+	Template           = alert.Template
+	RuleState          = alert.RuleState
+	Contact            = alert.Contact
+	RuleContact        = alert.RuleContact
+	TriggeredLog       = alert.TriggeredLog
+	NotifyLog          = alert.NotifyLog
+	TriggeredLogIDsMap = alert.TriggeredLogIDsMap
 
 	//* Alert Input Schema
 	AlertPayload = alert.AlertPayload

@@ -39,8 +39,9 @@ main
 .vscode
 *.conf
 bimap-ipoc
-conf/config.yaml
+config/config.yaml
 202502
 grafana
 ChatGPT*
 custom.yaml
+告警服務架構規劃/

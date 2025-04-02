@@ -9,7 +9,6 @@ import (
 	"github.com/detect-viz/shared-lib/apierrors"
 	"github.com/detect-viz/shared-lib/models"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // @Summary 獲取聯絡人列表
@@ -46,16 +45,10 @@ func (a *AlertAPI) ListContacts(c *gin.Context) {
 		}
 	}
 
-	contacts, nextCursor, err := a.contactService.List(user.Realm, cursor, limit)
+	contactResponses, nextCursor, err := a.contactService.List(user.Realm, cursor, limit)
 	if err != nil {
 		response.JSONError(c, 500, err)
 		return
-	}
-
-	// 將 Contact 轉換為 ContactResponse
-	contactResponses := make([]models.ContactResponse, len(contacts))
-	for i, contact := range contacts {
-		contactResponses[i] = a.contactService.ToResponse(contact)
 	}
 
 	response.JSONResponse(c, 200, gin.H{
@@ -82,14 +75,7 @@ func (a *AlertAPI) GetContact(c *gin.Context) {
 		return
 	}
 
-	// 將 ID 轉換為 []byte
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		response.JSONError(c, 400, apierrors.ErrInvalidID)
-		return
-	}
-
-	contact, err := a.contactService.Get(id[:])
+	contactResponse, err := a.contactService.Get(idStr)
 	if err != nil {
 		if apiErr, ok := err.(*apierrors.APIError); ok {
 			response.JSONError(c, apiErr.Code, apiErr)
@@ -98,9 +84,6 @@ func (a *AlertAPI) GetContact(c *gin.Context) {
 		}
 		return
 	}
-
-	// 將 Contact 轉換為 ContactResponse
-	contactResponse := a.contactService.ToResponse(*contact)
 
 	response.JSONSuccess(c, contactResponse)
 }
@@ -117,25 +100,20 @@ func (a *AlertAPI) GetContact(c *gin.Context) {
 // @Security ApiKeyAuth
 // @Router /alert/contact [post]
 func (a *AlertAPI) CreateContact(c *gin.Context) {
+	user := c.Keys["user"].(models.SSOUser)
 	var contactResp models.ContactResponse
 	if err := c.ShouldBindJSON(&contactResp); err != nil {
 		response.JSONError(c, 400, apierrors.ErrInvalidPayload)
 		return
 	}
 
-	// 將 ContactResponse 轉換為 Contact
-	contact := a.contactService.FromResponse(contactResp)
-
-	newContact, err := a.contactService.Create(&contact)
+	newContactResp, err := a.contactService.Create(user.Realm, &contactResp)
 	if err != nil {
 		response.JSONError(c, 500, err)
 		return
 	}
 
-	// 將 Contact 轉換為 ContactResponse
-	contactResponse := a.contactService.ToResponse(*newContact)
-
-	response.JSONCreated(c, contactResponse)
+	response.JSONCreated(c, newContactResp)
 }
 
 // @Summary 更新聯絡人
@@ -151,15 +129,9 @@ func (a *AlertAPI) CreateContact(c *gin.Context) {
 // @Security ApiKeyAuth
 // @Router /alert/contact/{id} [put]
 func (a *AlertAPI) UpdateContact(c *gin.Context) {
+	user := c.Keys["user"].(models.SSOUser)
 	idStr := c.Param("id")
 	if idStr == "" {
-		response.JSONError(c, 400, apierrors.ErrInvalidID)
-		return
-	}
-
-	// 將 ID 轉換為 []byte
-	id, err := uuid.Parse(idStr)
-	if err != nil {
 		response.JSONError(c, 400, apierrors.ErrInvalidID)
 		return
 	}
@@ -170,13 +142,10 @@ func (a *AlertAPI) UpdateContact(c *gin.Context) {
 		return
 	}
 
-	// 將 ContactResponse 轉換為 Contact
-	contact := a.contactService.FromResponse(contactResp)
+	// 確保 contactResp.ID 來自 path
+	contactResp.ID = idStr
 
-	// 確保 contact.ID 來自 path
-	contact.ID = id[:]
-
-	updatedContact, err := a.contactService.Update(&contact)
+	updatedContactResp, err := a.contactService.Update(user.Realm, &contactResp)
 	if err != nil {
 		if apiErr, ok := err.(*apierrors.APIError); ok {
 			response.JSONError(c, apiErr.Code, apiErr)
@@ -186,10 +155,7 @@ func (a *AlertAPI) UpdateContact(c *gin.Context) {
 		return
 	}
 
-	// 將 Contact 轉換為 ContactResponse
-	contactResponse := a.contactService.ToResponse(*updatedContact)
-
-	response.JSONSuccess(c, contactResponse)
+	response.JSONSuccess(c, updatedContactResp)
 }
 
 // @Summary 刪除聯絡人
@@ -210,14 +176,7 @@ func (a *AlertAPI) DeleteContact(c *gin.Context) {
 		return
 	}
 
-	// 將 ID 轉換為 []byte
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		response.JSONError(c, 400, apierrors.ErrInvalidID)
-		return
-	}
-
-	err = a.contactService.Delete(id[:])
+	err := a.contactService.Delete(idStr)
 	if err != nil {
 		if apiErr, ok := err.(*apierrors.APIError); ok {
 			response.JSONError(c, apiErr.Code, apiErr)
@@ -242,22 +201,20 @@ func (a *AlertAPI) DeleteContact(c *gin.Context) {
 // @Security ApiKeyAuth
 // @Router /alert/contact/test [post]
 func (a *AlertAPI) TestContact(c *gin.Context) {
+	user := c.Keys["user"].(models.SSOUser)
 	var contactResp models.ContactResponse
 	if err := c.ShouldBindJSON(&contactResp); err != nil {
 		response.JSONError(c, 400, apierrors.ErrInvalidPayload)
 		return
 	}
 
-	// 將 ContactResponse 轉換為 Contact
-	contact := a.contactService.FromResponse(contactResp)
-
 	// 確保 Config 存在
-	if contact.Config == nil {
+	if contactResp.Config == nil {
 		response.JSONError(c, 400, apierrors.ErrInvalidPayload)
 		return
 	}
 
-	err := a.contactService.NotifyTest(contact)
+	err := a.contactService.NotifyTest(user.Realm, &contactResp)
 	if err != nil {
 		if apiErr, ok := err.(*apierrors.APIError); ok {
 			response.JSONError(c, apiErr.Code, apiErr)

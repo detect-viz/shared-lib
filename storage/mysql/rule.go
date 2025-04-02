@@ -4,14 +4,13 @@ import (
 	"github.com/detect-viz/shared-lib/apierrors"
 	"github.com/detect-viz/shared-lib/models"
 
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // * 創建規則 + Alert State
 func (c *Client) CreateRule(rule *models.Rule) (*models.Rule, error) {
-	rule.ID = []byte(uuid.New().String())
+	rule.ID = GenerateUUID16()
 	err := c.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(rule).Error; err != nil {
 			return ParseDBError(err)
@@ -31,7 +30,7 @@ func (c *Client) CreateRule(rule *models.Rule) (*models.Rule, error) {
 			ruleState := models.RuleState{
 				RuleID: rule.ID,
 			}
-			if err := tx.Create(&ruleState).Error; err != nil {
+			if err := tx.Select("*").Create(&ruleState).Error; err != nil {
 				return ParseDBError(err)
 			}
 		}
@@ -196,7 +195,7 @@ func (c *Client) GetRulesByTarget(realm, resourceName, partitionName string) ([]
 func (c *Client) CreateRules(rules []models.Rule) error {
 	// 為每個規則生成 ID
 	for i := range rules {
-		rules[i].ID = []byte(uuid.New().String())
+		rules[i].ID = GenerateUUID16()
 	}
 
 	err := c.db.Transaction(func(tx *gorm.DB) error {
@@ -208,7 +207,9 @@ func (c *Client) CreateRules(rules []models.Rule) error {
 		// 為每個規則創建 RuleState
 		for _, rule := range rules {
 			ruleState := models.RuleState{
-				RuleID: rule.ID,
+				RuleID:       rule.ID,
+				State:        "normal",
+				ContactState: "normal",
 			}
 			if err := tx.Create(&ruleState).Error; err != nil {
 				return ParseDBError(err)

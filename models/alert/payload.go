@@ -7,7 +7,7 @@ type AlertPayload struct {
 
 type Metadata struct {
 	RealmName      string `json:"realm_name"`
-	DataSourceType string `json:"datasource_type"`
+	DatasourceName string `json:"datasource_name"`
 	ResourceName   string `json:"resource_name"`
 	Timestamp      int64  `json:"timestamp"` // 告警發送時間
 }

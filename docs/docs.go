@@ -886,13 +886,21 @@ const docTemplate_swagger = `{
                 "consumes": [
                     "application/json"
                 ],
-                "produces": [
-                    "application/json"
-                ],
                 "tags": [
                     "Alert"
                 ],
                 "summary": "告警處理",
+                "parameters": [
+                    {
+                        "description": "檢測數據",
+                        "name": "alertPayload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.AlertPayload"
+                        }
+                    }
+                ],
                 "responses": {
                     "200": {
                         "description": "成功回應",
@@ -1286,6 +1294,9 @@ const docTemplate_swagger = `{
         "alert.Contact": {
             "type": "object",
             "properties": {
+                "auto_apply": {
+                    "type": "boolean"
+                },
                 "channel_type": {
                     "type": "string"
                 },
@@ -1321,6 +1332,24 @@ const docTemplate_swagger = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "alert.Metadata": {
+            "type": "object",
+            "properties": {
+                "datasource_name": {
+                    "type": "string"
+                },
+                "realm_name": {
+                    "type": "string"
+                },
+                "resource_name": {
+                    "type": "string"
+                },
+                "timestamp": {
+                    "description": "告警發送時間",
+                    "type": "integer"
                 }
             }
         },
@@ -1371,6 +1400,18 @@ const docTemplate_swagger = `{
                 },
                 "uid": {
                     "type": "string"
+                }
+            }
+        },
+        "alert.MetricValue": {
+            "type": "object",
+            "properties": {
+                "timestamp": {
+                    "description": "數據發生時間",
+                    "type": "integer"
+                },
+                "value": {
+                    "type": "number"
                 }
             }
         },
@@ -1470,9 +1511,6 @@ const docTemplate_swagger = `{
                 },
                 "resource_name": {
                     "type": "string"
-                },
-                "status": {
-                    "type": "string"
                 }
             }
         },
@@ -1510,9 +1548,31 @@ const docTemplate_swagger = `{
                 }
             }
         },
+        "models.AlertPayload": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "description": "監控數據",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/definitions/alert.MetricValue"
+                        }
+                    }
+                },
+                "metadata": {
+                    "description": "告警元數據",
+                    "$ref": "#/definitions/alert.Metadata"
+                }
+            }
+        },
         "models.ContactResponse": {
             "type": "object",
             "properties": {
+                "auto_apply": {
+                    "type": "boolean"
+                },
                 "channel_type": {
                     "type": "string"
                 },
@@ -1530,9 +1590,6 @@ const docTemplate_swagger = `{
                     "type": "integer"
                 },
                 "name": {
-                    "type": "string"
-                },
-                "realm_name": {
                     "type": "string"
                 },
                 "retry_delay": {
@@ -1722,7 +1779,10 @@ const docTemplate_swagger = `{
                     "type": "integer"
                 },
                 "last_triggered_log_id": {
-                    "$ref": "#/definitions/common.JSONMap"
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
                 },
                 "last_triggered_severity": {
                     "type": "string"
@@ -1778,9 +1838,6 @@ const docTemplate_swagger = `{
                     "type": "integer"
                 },
                 "resource_name": {
-                    "type": "string"
-                },
-                "status": {
                     "type": "string"
                 }
             }

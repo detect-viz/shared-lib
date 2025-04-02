@@ -13,6 +13,8 @@ func (c *Client) UpdateNotifyLog(notify models.NotifyLog) error {
 
 // 寫入通知日誌
 func (c *Client) CreateNotifyLog(notify models.NotifyLog) error {
+	notify.ID = GenerateUUID16()
+
 	// 開啟交易
 	tx := c.db.Begin()
 	if tx.Error != nil {

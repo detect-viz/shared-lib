@@ -13,7 +13,7 @@ import (
 type AuditTimeModel struct {
 	CreatedAt int64          `json:"-" gorm:"autoCreateTime"`
 	UpdatedAt int64          `json:"-" gorm:"autoUpdateTime"`
-	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"` // 軟刪除
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index;precision:0"` // 軟刪除
 }
 type AuditUserModel struct {
 	CreatedBy *string `json:"-" gorm:"type:varchar(36);index"`

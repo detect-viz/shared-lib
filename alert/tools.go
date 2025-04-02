@@ -14,18 +14,60 @@ import (
 )
 
 func (s *Service) getMetricCategory(dataSource, metricName string) string {
-	for _, rule := range s.global.MetricRules {
-		if rule.MetricRawName == metricName && slices.Contains(rule.MatchDatasourceNames, dataSource) {
-			return rule.Category
+	s.logger.Debug("getMetricCategory",
+		zap.String("dataSource", dataSource),
+		zap.String("metricName", metricName))
+
+	// 檢查 MetricRules 是否為空
+	if len(s.global.MetricRules) == 0 {
+		s.logger.Warn("MetricRules 為空，無法匹配 category")
+		return "unknown"
+	}
+
+	s.logger.Debug("開始匹配 category",
+		zap.Int("rules_count", len(s.global.MetricRules)))
+
+	for uid, rule := range s.global.MetricRules {
+		s.logger.Debug("檢查規則",
+			zap.String("uid", uid),
+			zap.String("metric_raw_name", rule.MetricRawName),
+			zap.Strings("match_datasource_names", rule.MatchDatasourceNames),
+			zap.String("category", rule.Category))
+
+		// 檢查 MetricRawName 是否匹配
+		if rule.MetricRawName == metricName {
+			s.logger.Debug("MetricRawName 匹配成功",
+				zap.String("metric_raw_name", rule.MetricRawName))
+
+			// 檢查 MatchDatasourceNames 是否為空或包含 dataSource
+			if len(rule.MatchDatasourceNames) == 0 {
+				s.logger.Debug("MatchDatasourceNames 為空，直接返回 category",
+					zap.String("category", rule.Category))
+				return rule.Category
+			} else if slices.Contains(rule.MatchDatasourceNames, dataSource) {
+				s.logger.Debug("MatchDatasourceNames 包含 dataSource，返回 category",
+					zap.String("dataSource", dataSource),
+					zap.String("category", rule.Category))
+				return rule.Category
+			} else {
+				s.logger.Debug("MatchDatasourceNames 不包含 dataSource，繼續檢查下一個規則",
+					zap.String("dataSource", dataSource),
+					zap.Strings("match_datasource_names", rule.MatchDatasourceNames))
+			}
 		}
 	}
+
+	s.logger.Warn("未找到匹配的 category，返回 unknown",
+		zap.String("dataSource", dataSource),
+		zap.String("metricName", metricName))
 	return "unknown"
 }
 
 func (s *Service) matchAutoApplyRule(realm, dataSource, metricName string) *[]models.Rule {
 	matchMetricRuleUIDs := []string{}
 	for _, rule := range s.global.MetricRules {
-		if rule.MetricRawName == metricName && slices.Contains(rule.MatchDatasourceNames, dataSource) {
+		if rule.MetricRawName == metricName &&
+			(len(rule.MatchDatasourceNames) == 0 || slices.Contains(rule.MatchDatasourceNames, dataSource)) {
 			matchMetricRuleUIDs = append(matchMetricRuleUIDs, rule.UID)
 		}
 	}

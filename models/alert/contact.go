@@ -9,12 +9,13 @@ import (
 )
 
 type Contact struct {
-	ID           []byte         `json:"id" gorm:"index"`
+	ID           []byte         `json:"id" gorm:"primaryKey"`
 	RealmName    string         `json:"realm_name" gorm:"default:master"`
 	Name         string         `json:"name"`
 	ChannelType  string         `json:"channel_type"`
 	Enabled      bool           `json:"enabled" gorm:"default:1"`
 	SendResolved bool           `json:"send_resolved" gorm:"default:1"`
+	AutoApply    bool           `json:"auto_apply" gorm:"default:0"`
 	MaxRetry     int            `json:"max_retry" gorm:"default:3"`
 	RetryDelay   string         `json:"retry_delay" gorm:"default:5m"`
 	Config       common.JSONMap `json:"config" gorm:"type:json"`
@@ -24,12 +25,13 @@ type Contact struct {
 }
 
 type ContactResponse struct {
+	RealmName    string                 `json:"-"`
 	ID           string                 `json:"id"`
-	RealmName    string                 `json:"realm_name"`
 	Name         string                 `json:"name"`
 	ChannelType  string                 `json:"channel_type"`
 	Enabled      bool                   `json:"enabled"`
 	SendResolved bool                   `json:"send_resolved"`
+	AutoApply    bool                   `json:"auto_apply"`
 	MaxRetry     int                    `json:"max_retry"`
 	RetryDelay   string                 `json:"retry_delay"`
 	Config       map[string]interface{} `json:"config"`

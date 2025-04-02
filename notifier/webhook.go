@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/detect-viz/shared-lib/models/common"
@@ -60,12 +61,18 @@ func (s *serviceImpl) sendWebhook(info common.NotifySetting) error {
 		if info.Config["url"] == "" {
 			info.Config["url"] = "https://api.line.me/v2/bot/message/push"
 		}
+
+		// 處理訊息格式，確保換行符號正確顯示
+		lineMessage := info.Config["title"] + "\n\n" + info.Config["message"]
+		// 移除多餘的換行符號
+		lineMessage = strings.ReplaceAll(lineMessage, "\n\n\n", "\n\n")
+
 		payload = map[string]interface{}{
 			"to": info.Config["to"],
-			"messages": []map[string]string{
+			"messages": []map[string]interface{}{
 				{
 					"type": "text",
-					"text": info.Config["title"] + "\n" + info.Config["message"],
+					"text": lineMessage,
 				},
 			},
 		}
@@ -100,9 +107,25 @@ func (s *serviceImpl) sendWebhook(info common.NotifySetting) error {
 		return err
 	}
 
+	// 設置請求頭
 	req.Header.Set("Content-Type", "application/json")
-	if token := info.Config["channel_token"]; token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "DetectViz-Notifier/1.0")
+
+	// 根據通知類型設置特定請求頭
+	switch info.Type {
+	case "line":
+		// 只有當 channel_token 不為空時才添加到請求頭
+		if token, ok := info.Config["channel_token"]; ok && token != "" {
+			// 確保 token 格式正確
+			token = strings.TrimSpace(token)
+			req.Header.Set("Authorization", "Bearer "+token)
+			fmt.Printf("LINE 通知 Authorization 頭: Bearer %s\n", token)
+		} else {
+			fmt.Println("警告: LINE 通知缺少 channel_token")
+		}
+
+	case "slack":
+		// ... existing code ...
 	}
 
 	client := http.DefaultClient

@@ -34,4 +34,5 @@ var (
 	ErrUsedByRules        = NewAPIError(409, "仍被使用中", errors.New("used by rules"))
 	ErrDuplicateEntry     = NewAPIError(409, "名稱已存在", errors.New("data already exists"))
 	ErrInternalError      = NewAPIError(500, "伺服器錯誤", errors.New("internal server error"))
+	ErrRecordDeleted      = NewAPIError(404, "資源已軟刪除", errors.New("record deleted"))
 )

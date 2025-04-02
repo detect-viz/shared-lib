@@ -14,7 +14,7 @@ import (
 func (c *Client) CheckTriggeredLogExists(ruleID string, resourceName string, metricName string, firstTriggeredTime int64) (bool, error) {
 	var count int64
 	err := c.db.Model(&models.TriggeredLog{}).
-		Where("rule_id = ? AND resource_name = ? AND metric_name = ? AND first_triggered_time = ?",
+		Where("rule_id = ? AND resource_name = ? AND metric_name = ? AND triggered_at = ?",
 			ruleID, resourceName, metricName, firstTriggeredTime).
 		Count(&count).Error
 	if err != nil {
@@ -25,6 +25,7 @@ func (c *Client) CheckTriggeredLogExists(ruleID string, resourceName string, met
 
 // 寫入觸發日誌
 func (c *Client) CreateTriggeredLog(triggered models.TriggeredLog) error {
+	triggered.ID = GenerateUUID16()
 	c.logger.Debug("寫入觸發日誌", zap.Any("triggered", triggered))
 	return c.db.Create(&triggered).Error
 }
@@ -68,7 +69,7 @@ func (c *Client) GetActiveTriggeredLog(ruleID []byte, resourceName, metricName s
 	err := c.db.
 		Where(`rule_id = ? AND resource_name = ? AND metric_name = ? 
 			   AND resolved_time IS NULL 
-			   AND (notify_state IS NULL OR notify_state = 'failed')`,
+			   AND (notify_state = 'pending' OR notify_state = 'failed')`,
 			ruleID, resourceName, metricName).
 		First(&triggered).Error
 
@@ -81,35 +82,40 @@ func (c *Client) GetActiveTriggeredLog(ruleID []byte, resourceName, metricName s
 	return &triggered, nil
 }
 
-// 獲取需要發送告警通知的觸發日誌
-func (c *Client) GetTriggeredLogsForAlertNotify(timestamp int64) ([]models.TriggeredLog, error) {
+// GetPendingTriggeredLogs 獲取待通知的觸發日誌
+func (c *Client) GetPendingTriggeredLogs(timestamp int64) ([]models.TriggeredLog, error) {
 	var triggereds []models.TriggeredLog
+
+	// 修改查詢，使用 JOIN 連接 rule_states 表來獲取靜音期間資訊
 	err := c.db.
-		Where(`timestamp < ? 
-			   AND contact_state != 'mute' 
-			   AND (silence_end IS NULL OR silence_end < ?) 
-			   AND (notify_state IS NULL OR notify_state = 'failed')
-			   AND resolved_time IS NULL`,
+		Joins("LEFT JOIN rule_states ON triggered_logs.rule_id = rule_states.rule_id").
+		Where(`triggered_logs.triggered_at < ? 
+			   AND (rule_states.silence_start_at IS NULL OR rule_states.silence_end_at IS NULL OR rule_states.silence_end_at < ?) 
+			   AND (triggered_logs.notify_state = 'pending' OR triggered_logs.notify_state = 'failed')
+			   AND triggered_logs.resolved_at IS NULL`,
 			timestamp, time.Now().Unix()).
 		Find(&triggereds).Error
 
 	if err != nil {
-		return nil, fmt.Errorf("查詢待通知的 TriggeredLog 失敗: %w", err)
+		return nil, err
 	}
+
 	return triggereds, nil
 }
 
-// 需要發送恢復通知的觸發日誌
-func (c *Client) GetTriggeredLogsForResolvedNotify(timestamp int64) ([]models.TriggeredLog, error) {
+// GetResolvedTriggeredLogs 獲取已解決但未發送解決通知的觸發日誌
+func (c *Client) GetResolvedTriggeredLogs(timestamp int64) ([]models.TriggeredLog, error) {
 	var triggereds []models.TriggeredLog
 
+	// 修改查詢，使用 JOIN 連接 rule_states 表來獲取靜音期間資訊
 	err := c.db.
-		Where("timestamp < ? AND contact_state != ? AND (silence_end IS NULL OR silence_end < ?) AND resolved_time != 0 AND resolved_notify_state IS NULL",
-			timestamp, "mute", time.Now().Unix()).
+		Joins("LEFT JOIN rule_states ON triggered_logs.rule_id = rule_states.rule_id").
+		Where("triggered_logs.triggered_at < ? AND (rule_states.silence_start_at IS NULL OR rule_states.silence_end_at IS NULL OR rule_states.silence_end_at < ?) AND triggered_logs.resolved_at != 0 AND triggered_logs.resolved_notify_state IS NULL",
+			timestamp, time.Now().Unix()).
 		Find(&triggereds).Error
 
 	if err != nil {
-		return nil, fmt.Errorf("查詢待發送恢復通知的 `TriggeredLog` 失敗: %w", err)
+		return nil, err
 	}
 
 	return triggereds, nil
